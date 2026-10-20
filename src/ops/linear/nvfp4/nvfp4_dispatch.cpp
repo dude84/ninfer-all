@@ -19,6 +19,21 @@ const Nvfp4LinearShape& resolve_shape(std::int32_t n, std::int32_t k, LinearPoli
         if (shape->n == n && shape->k == k) return *shape;
     throw std::invalid_argument("nvfp4 linear: unsupported shape");
 }
+
+// Calls that take the unified templates at every width. The DFlash2 drafter shapes exist only
+// there. And a weight-only parent (a policy without A4, as the NVFP4-encoded DFlash2 drafter's
+// projections are stored) runs the A16 routes the ninfer-5090 port runs, at every width, so its
+// arithmetic does not depend on this line's measured width bands. sm_8x builds read every NVFP4
+// policy as A16 and keep their legacy bands.
+bool unified_at_every_width(std::int32_t n, std::int32_t k, LinearPolicy policy) {
+    if (unified::nvfp4_dflash2_shape(n, k)) return true;
+#if defined(NINFER_SM8X_COMPAT)
+    (void)policy;
+    return false;
+#else
+    return kUnifiedLinearRoutes && valid_linear_policy(policy) && !allows_a4(policy);
+#endif
+}
 } // namespace
 
 static std::size_t nvfp4_linear_workspace_capacity_bytes_own(std::int32_t n, std::int32_t k,
@@ -36,8 +51,7 @@ static std::size_t nvfp4_linear_workspace_capacity_bytes_own(std::int32_t n, std
 std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k,
                                                   LinearPolicy policy, std::int32_t min_tokens,
                                                   std::int32_t max_tokens) {
-    // The DFlash2 drafter shapes exist only on the unified templates (weight-only A16).
-    if (unified::nvfp4_dflash2_shape(n, k)) {
+    if (unified_at_every_width(n, k, policy)) {
         return unified::nvfp4_linear_workspace_capacity_bytes(n, k, policy, min_tokens,
                                                               max_tokens);
     }
@@ -53,7 +67,7 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k
 
 void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                     WorkspaceArena* workspace, cudaStream_t stream) {
-    if (x.ne[1] > 0 && (unified::nvfp4_dflash2_shape(weight.n, weight.k) ||
+    if (x.ne[1] > 0 && (unified_at_every_width(weight.n, weight.k, policy) ||
                         linear_route_table(LinearRouteFamily::Nvfp4, x.ne[1]) ==
                             LinearRouteTable::Unified)) {
         unified::nvfp4_dispatch(x, weight, out, policy, workspace, stream);
