@@ -20,6 +20,7 @@
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/nvfp4/nvfp4_reference.h"
 
 #include <algorithm>
 #include <array>
@@ -576,6 +577,11 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tens
         if (hidden != 5120 || query_key_value_weight.n != kRows ||
             query_key_value_weight.k != hidden) {
             throw std::invalid_argument("nvfp4 attn_input_proj: unsupported Q/K/V weight shape");
+        }
+        if (detail::nvfp4_reference_site("qkv")) { // R7 diagnostic (NINFER_R7_REFERENCE)
+            Tensor* outputs[] = {&q, &k, &v};
+            detail::nvfp4_reference_linear(x, query_key_value_weight, outputs, stream);
+            return;
         }
         detail::nvfp4_dflash2_attn_input_launch(x, query_key_value_weight, q, k, v, stream);
         return;

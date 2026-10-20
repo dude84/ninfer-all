@@ -8,6 +8,7 @@
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/gguf/gguf_linear.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/nvfp4/nvfp4_reference.h"
 #include "ops/linear/sm70/sm70_dequantize.h"
 #include "ops/linear/sm70/sm70_gemm.h"
 #include "ops/linear/sm70/sm70_integer.h"
@@ -230,6 +231,11 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
 
     if (nvfp4_weight) {
         (void)detail::validate_nvfp4_weight(gate_up_weight, "nvfp4 linear_swiglu");
+        // R7 diagnostic (NINFER_R7_REFERENCE=gate_up): a weight-only parent on the FP32 reference.
+        if (!allows_a4(policy) && detail::nvfp4_reference_site("gate_up")) {
+            detail::nvfp4_reference_swiglu(x, gate_up_weight, out, stream);
+            return;
+        }
         detail::nvfp4_linear_swiglu_dispatch(x, gate_up_weight, out, policy, ws, stream);
         return;
     }

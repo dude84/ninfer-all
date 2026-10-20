@@ -3,6 +3,7 @@
 
 #include "core/layout.h"
 #include "ops/context_kv_materialize/launch.h"
+#include "ops/linear/nvfp4/nvfp4_reference.h"
 #include "ops/kv_cache/d256_profile.h"
 
 #include <algorithm>
@@ -194,6 +195,12 @@ void context_kv_materialize(
     Tensor key_scratch;
     if (detail::context_kv_materialize_uses_scratch(route))
         key_scratch = allocate_key_scratch(workspace, columns);
+    if (shared_qtype == QType::NVFP4 && detail::nvfp4_reference_site("context")) {
+        detail::context_kv_materialize_nvfp4_reference_launch(context, positions, counts,
+                                                              state_slots, layers, envelope,
+                                                              stream);
+        return;
+    }
     if (shared_qtype == QType::NVFP4) {
         detail::context_kv_materialize_nvfp4_launch(context, positions, counts, state_slots, layers,
                                                     envelope, route, key_scratch, stream);
