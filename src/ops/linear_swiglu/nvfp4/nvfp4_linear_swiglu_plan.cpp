@@ -149,9 +149,27 @@ static std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes_own(LinearPolicy
     return maximum;
 }
 
+namespace {
+// A weight-only gate/up parent (a policy without A4, as the NVFP4-encoded DFlash2 drafter's is
+// stored) takes the unified A16 routes at every width -- the ninfer-5090 port's routes -- so its
+// arithmetic does not depend on this line's measured width bands. sm_8x builds keep theirs.
+bool weight_only_unified(LinearPolicy policy) {
+#if defined(NINFER_SM8X_COMPAT)
+    (void)policy;
+    return false;
+#else
+    return kUnifiedLinearRoutes && valid_linear_policy(policy) && !allows_a4(policy);
+#endif
+}
+} // namespace
+
 std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
                                                          std::int32_t min_tokens,
                                                          std::int32_t max_tokens) {
+    if (weight_only_unified(policy)) {
+        return unified::nvfp4_linear_swiglu_workspace_capacity_bytes(unified_policy(policy),
+                                                                     min_tokens, max_tokens);
+    }
     return capacity_by_table(
         min_tokens, max_tokens,
         [](std::int32_t width) { return fused_route_table("unified/nvfp4_linear_swiglu", width); },
@@ -166,7 +184,8 @@ std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy policy,
 void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor& out,
                                   LinearPolicy policy, WorkspaceArena& workspace,
                                   cudaStream_t stream) {
-    if (fused_route_table("unified/nvfp4_linear_swiglu", x.ne[1]) == LinearRouteTable::Unified) {
+    if (weight_only_unified(policy) ||
+        fused_route_table("unified/nvfp4_linear_swiglu", x.ne[1]) == LinearRouteTable::Unified) {
         unified::nvfp4_linear_swiglu_dispatch(x, weight, out, unified_policy(policy), workspace,
                                               stream);
         return;
