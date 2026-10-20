@@ -16,6 +16,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <span>
@@ -245,6 +247,13 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                                (request_plan.summary.effective_output_tokens == 0
                                     ? 0U
                                     : request_plan.summary.effective_output_tokens - 1U));
+    if (std::getenv("NINFER_R7_TRACE") != nullptr) {
+        // R7 diagnostic, catalogued-continuation admissions (the hybrid index has its own line):
+        // the reuse path, the reused frontier and the prompt length; no prompt text.
+        std::fprintf(stderr, "[r7] admit lane=%u prompt=%u reuse=%u path=%d\n",
+                     static_cast<unsigned>(lane), static_cast<unsigned>(prompt_tokens),
+                     static_cast<unsigned>(base), static_cast<int>(request_plan.reuse));
+    }
     try {
         const std::uint32_t state_slots = request_plan.demand.active_entitlement.device.state_slots;
         const bool preserving_source =

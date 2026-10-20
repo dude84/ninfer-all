@@ -1638,6 +1638,13 @@ private:
     void refresh_state_views(SequenceState& sequence);
     void reserve_state_entitlement(SequenceState& sequence, std::uint32_t slots);
     void settle_state_fork(SequenceState& sequence);
+    // Appends a lagging DFlash/DFlash2 draft context (the last round's pending target features)
+    // before a lane's state is published as a continuation endpoint, so the published StateImage
+    // holds the draft context up to its execution frontier. The pending features are lane-owned
+    // and are not part of the StateImage, so they cannot be appended after publication. Mirrors
+    // the ninfer-5090 port's pause normalization (session/pause.cpp). Never throws; returns
+    // whether the draft context is caught up.
+    bool catch_up_dflash_context(SequenceState& sequence, std::uint32_t lane) noexcept;
     bool publish_active_continuation(SequenceState& state, RequestControl& request,
                                      std::uint32_t lane, std::uint32_t continuation_index,
                                      qwen3_5::ContinuationSummary& summary) noexcept;
