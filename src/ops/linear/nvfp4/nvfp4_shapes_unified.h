@@ -15,4 +15,9 @@ extern const Nvfp4LinearShape kNvfp4N16384K5120;
 extern const Nvfp4LinearShape kNvfp4N34816K5120;
 extern const Nvfp4LinearShape kNvfp4N5120K6144;
 extern const Nvfp4LinearShape kNvfp4N5120K17408;
+// DFlash2 drafter shapes of an NVFP4-encoded draft module (weight-only A16; shapes/dflash2_unified.cu).
+// They have no legacy-table route, so the legacy dispatcher forwards them here at every width.
+extern const Nvfp4LinearShape kNvfp4DFlash2Feature;
+extern const Nvfp4LinearShape kNvfp4DFlash2AttnOut;
+[[nodiscard]] bool nvfp4_dflash2_shape(std::int32_t n, std::int32_t k);
 } // namespace ninfer::ops::detail::unified

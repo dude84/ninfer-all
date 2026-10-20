@@ -19,6 +19,7 @@ namespace {
 enum class Nvfp4LinearSwiGluRoute {
     DecodeFusedA16,
     SmallTFusedA16,
+    MatrixFusedA16,
     FusedW4A4,
     LinearW4A4Post,
     TmaFusedW4A4,
@@ -47,6 +48,12 @@ Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
     if (!allows_a4(policy)) { // A16Only, AllowA8 and the integer-A8 policies
         if (tokens == 1) { return Nvfp4LinearSwiGluRoute::DecodeFusedA16; }
         if (tokens <= 16) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
+#if !defined(NINFER_SM8X_COMPAT)
+        // A weight-only parent on an sm_120a build (an NVFP4-encoded DFlash2 drafter at a verify
+        // width times a batch above 16): the port's fused wide-T A16 route on the unified
+        // templates, no workspace. The sm_8x builds keep the refusal below unchanged.
+        return Nvfp4LinearSwiGluRoute::MatrixFusedA16;
+#else
         // Deliberately verbose. This throw fires during *runtime planning*, before a token
         // is processed, so on sm_86 it is the entire user-visible symptom of an artifact
         // that cannot be loaded at all -- and "registered only through T=16" gives an
@@ -54,6 +61,7 @@ Nvfp4LinearSwiGluRoute resolve_route(LinearPolicy policy, std::int32_t tokens) {
         // deliberate decisions to work out why; the message now carries that.
         throw std::invalid_argument(
             "nvfp4 linear_swiglu: the A16 route is registered only through T=16, and on sm_80/86/89 A16 is the only policy available for NVFP4 weights (no NVFP4 tensor-core path), so this artifact cannot serve a prefill chunk wider than 16 columns on this architecture. Use a groupwise-int artifact here; an sm_120a build runs NVFP4 through AllowA4 at any width.");
+#endif
     }
     if (tokens == 1) { return Nvfp4LinearSwiGluRoute::DecodeFusedA16; }
     if (tokens <= 4) { return Nvfp4LinearSwiGluRoute::SmallTFusedA16; }
@@ -169,6 +177,9 @@ void nvfp4_linear_swiglu_dispatch(const Tensor& x, const Weight& weight, Tensor&
         return;
     case Nvfp4LinearSwiGluRoute::SmallTFusedA16:
         nvfp4_linear_swiglu_small_t_launch(x, weight, out, stream);
+        return;
+    case Nvfp4LinearSwiGluRoute::MatrixFusedA16:
+        unified::nvfp4_linear_swiglu_matrix_launch(x, weight, out, stream);
         return;
     case Nvfp4LinearSwiGluRoute::FusedW4A4:
         nvfp4_linear_swiglu_w4a4_launch(x, weight, out, workspace, stream);

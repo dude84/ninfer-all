@@ -74,11 +74,16 @@ void require_finish_projection_weight(const Weight& weight, std::int32_t input_r
 }
 
 // A row-split projection of any other format goes through Linear, which validates its registered
-// format and shape; the fused routes are Q8's.
+// format and shape; the fused routes are Q8's. So does an NVFP4 block-scaled one: the DFlash2
+// drafter encoded by the ninfer-5090 port's converter, whose attention output [5120,4096] and down
+// [5120,17408] projections Linear serves weight-only A16 (as the port materializes them).
 bool materialized_projection(const Weight& weight, std::int32_t input_rows) {
-    return weight.qtype != QType::Q8_G32_FP16 && weight.layout == QuantLayout::RowSplit &&
-           weight.ndim == 2 && weight.n == kHidden && weight.k == input_rows &&
-           weight.qdata != nullptr && weight.payload != nullptr;
+    const bool layout =
+        weight.layout == QuantLayout::RowSplit ||
+        (weight.qtype == QType::NVFP4 && weight.layout == QuantLayout::BlockScaleK16M128x4);
+    return weight.qtype != QType::Q8_G32_FP16 && layout && weight.ndim == 2 &&
+           weight.n == kHidden && weight.k == input_rows && weight.qdata != nullptr &&
+           weight.payload != nullptr;
 }
 
 struct Range {

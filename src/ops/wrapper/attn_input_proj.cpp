@@ -575,6 +575,17 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tens
     require_matrix(q, kQRows, cols, "q");
     require_matrix(k, kKvRows, cols, "k");
     require_matrix(v, kKvRows, cols, "v");
+    if (query_key_value_weight.qtype == QType::NVFP4) {
+        // The NVFP4-encoded DFlash2 drafter (the ninfer-5090 port's converter): one fused
+        // [6144,5120] parent, weight-only A16. Only the 5120-wide drafter geometry is registered.
+        detail::validate_nvfp4_weight(query_key_value_weight, "nvfp4 attn_input_proj q/k/v");
+        if (hidden != 5120 || query_key_value_weight.n != kRows ||
+            query_key_value_weight.k != hidden) {
+            throw std::invalid_argument("nvfp4 attn_input_proj: unsupported Q/K/V weight shape");
+        }
+        detail::nvfp4_dflash2_attn_input_launch(x, query_key_value_weight, q, k, v, stream);
+        return;
+    }
     require_q8_rowsplit(query_key_value_weight, kRows, hidden, "query/key/value weight");
     if (sm70_direct_split(x, query_key_value_weight, {&q, &k, &v}, stream)) { return; }
     detail::q8_attn_input_dispatch(x, query_key_value_weight, q, k, v, stream);

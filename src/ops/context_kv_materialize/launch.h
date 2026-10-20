@@ -37,4 +37,14 @@ void context_kv_materialize_launch(
     ContextKVMaterializeExecutionEnvelope envelope, ContextKVMaterializeRoute route,
     const Tensor& key_scratch, cudaStream_t stream);
 
+// The NVFP4 family for the weight-only NVFP4 [1024,5120] context key/value parents of a DFlash2
+// drafter encoded by the ninfer-5090 port's converter. It takes the same route table and the same
+// key-scratch contract (every route but Fused64 runs the key-post pass); the small-column grouped
+// routes land on the 32-column MMA tile. Ported from the port's materialize_nvfp4.cu.
+void context_kv_materialize_nvfp4_launch(
+    const Tensor& context, const Tensor& positions, const Tensor& counts, const Tensor& state_slots,
+    const std::array<ContextKVMaterializeLayerView, kContextKVMaterializeLayers>& layers,
+    ContextKVMaterializeExecutionEnvelope envelope, ContextKVMaterializeRoute route,
+    const Tensor& key_scratch, cudaStream_t stream);
+
 } // namespace ninfer::ops::detail

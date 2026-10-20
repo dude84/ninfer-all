@@ -241,8 +241,12 @@ SingleProjectionWeight prepare_attn_input_proj_weights(const WeightInput& query,
             "QKV input projection: unsupported logical geometry");
     const std::array inputs{query, key, value};
     auto result = single(inputs);
-    require(result.weight.qtype == QType::Q8_G32_FP16,
-            "QKV input projection: native form requires Q8");
+    // NVFP4 is the DFlash2 drafter encoded by the ninfer-5090 port's converter (`_nvfp4_draft`:
+    // draft projections `nvfp4_maxabs`, A16Only). Its three-output route is registered for the
+    // 5120-wide drafter only and runs A16 whatever the stored permission.
+    const bool nvfp4 = result.weight.qtype == QType::NVFP4 && q[1] == 5120;
+    require(result.weight.qtype == QType::Q8_G32_FP16 || nvfp4,
+            "QKV input projection: native form requires Q8, or NVFP4 at the 5120-wide geometry");
     return result;
 }
 
