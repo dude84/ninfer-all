@@ -1645,6 +1645,12 @@ private:
     // the ninfer-5090 port's pause normalization (session/pause.cpp). Never throws; returns
     // whether the draft context is caught up.
     bool catch_up_dflash_context(SequenceState& sequence, std::uint32_t lane) noexcept;
+    // R7 diagnostic (NINFER_R7_TRACE=1): synchronizes and prints a checksum of one StateImage
+    // slot's DFlash2 draft ring (every layer's K and V) plus how many of layer 0's K vectors in
+    // the window before `frontier` are all zero, so a capture and its later restores can be
+    // compared for the same image. Slow (copies the slot to the host); diagnostics only.
+    void trace_dflash_ring(const char* tag, std::int32_t slot, std::uint32_t frontier,
+                           std::uint32_t lane) noexcept;
     bool publish_active_continuation(SequenceState& state, RequestControl& request,
                                      std::uint32_t lane, std::uint32_t continuation_index,
                                      qwen3_5::ContinuationSummary& summary) noexcept;
