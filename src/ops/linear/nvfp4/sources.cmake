@@ -14,6 +14,7 @@ target_sources(ninfer_ops PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n5120_k6144_unified.cu"
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n5120_k17408.cu"
   "${CMAKE_CURRENT_LIST_DIR}/shapes/n5120_k17408_unified.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/shapes/dflash2_unified.cu"
 )
 
 if(TARGET ninfer_nvfp4_non_rdc)

@@ -69,4 +69,10 @@ void nvfp4_attn_input_dispatch(const Tensor& x, const Weight& weight, Tensor& q,
                                Tensor& k, Tensor& v, LinearPolicy policy, WorkspaceArena* workspace,
                                cudaStream_t stream);
 
+// The DFlash2 drafter's three-output projection from one NVFP4 [6144,5120] parent into q
+// [4096,T], k [1024,T] and v [1024,T]. Weight-only A16 at every T (the drafter never quantizes
+// its activations), no workspace. Ported from the ninfer-5090 port.
+void nvfp4_dflash2_attn_input_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k,
+                                     Tensor& v, cudaStream_t stream);
+
 } // namespace ninfer::ops::detail

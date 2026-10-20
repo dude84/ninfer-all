@@ -6,8 +6,9 @@
 
 namespace ninfer::ops::detail::unified {
 namespace {
-const std::array kShapes{&kNvfp4N14336K5120, &kNvfp4N16384K5120, &kNvfp4N34816K5120,
-                         &kNvfp4N5120K6144, &kNvfp4N5120K17408};
+const std::array kShapes{&kNvfp4N14336K5120,    &kNvfp4N16384K5120,   &kNvfp4N34816K5120,
+                         &kNvfp4N5120K6144,     &kNvfp4N5120K17408,   &kNvfp4DFlash2Feature,
+                         &kNvfp4DFlash2AttnOut};
 
 const Nvfp4LinearShape& resolve_shape(std::int32_t n, std::int32_t k, LinearPolicy policy) {
     if (!valid_linear_policy(policy))

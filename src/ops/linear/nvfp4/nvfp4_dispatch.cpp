@@ -2,6 +2,7 @@
 #include "ops/linear/common/route_table.h"
 #include "ops/linear/nvfp4/nvfp4_dispatch_unified.h"
 #include "ops/linear/nvfp4/nvfp4_shapes.h"
+#include "ops/linear/nvfp4/nvfp4_shapes_unified.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
 #include <array>
 #include <stdexcept>
@@ -35,6 +36,11 @@ static std::size_t nvfp4_linear_workspace_capacity_bytes_own(std::int32_t n, std
 std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k,
                                                   LinearPolicy policy, std::int32_t min_tokens,
                                                   std::int32_t max_tokens) {
+    // The DFlash2 drafter shapes exist only on the unified templates (weight-only A16).
+    if (unified::nvfp4_dflash2_shape(n, k)) {
+        return unified::nvfp4_linear_workspace_capacity_bytes(n, k, policy, min_tokens,
+                                                              max_tokens);
+    }
     return capacity_by_table(
         min_tokens, max_tokens,
         [](std::int32_t width) { return linear_route_table(LinearRouteFamily::Nvfp4, width); },
@@ -47,8 +53,9 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k
 
 void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                     WorkspaceArena* workspace, cudaStream_t stream) {
-    if (x.ne[1] > 0 &&
-        linear_route_table(LinearRouteFamily::Nvfp4, x.ne[1]) == LinearRouteTable::Unified) {
+    if (x.ne[1] > 0 && (unified::nvfp4_dflash2_shape(weight.n, weight.k) ||
+                        linear_route_table(LinearRouteFamily::Nvfp4, x.ne[1]) ==
+                            LinearRouteTable::Unified)) {
         unified::nvfp4_dispatch(x, weight, out, policy, workspace, stream);
         return;
     }

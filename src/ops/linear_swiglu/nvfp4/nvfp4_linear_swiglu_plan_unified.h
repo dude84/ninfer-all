@@ -20,6 +20,9 @@ void nvfp4_linear_swiglu_decode_launch(const Tensor& x, const Weight& weight, Te
                                        cudaStream_t stream);
 void nvfp4_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                         cudaStream_t stream);
+// Fused A16 above T=16 (no workspace); ported from the ninfer-5090 port.
+void nvfp4_linear_swiglu_matrix_launch(const Tensor& x, const Weight& weight, Tensor& out,
+                                       cudaStream_t stream);
 void nvfp4_linear_swiglu_a4_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                    WorkspaceArena& workspace, cudaStream_t stream);
 

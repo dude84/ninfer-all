@@ -6,6 +6,7 @@
 #include "ops/kv_cache/d256_profile.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -36,6 +37,26 @@ void require_tensor(const Tensor& tensor, DType dtype, std::int32_t n0, std::int
 }
 
 void require_weight(const Weight& weight, const char* name) {
+    if (weight.qtype == QType::NVFP4) {
+        // The weight-only NVFP4 [1024,5120] context key/value parents of a DFlash2 drafter
+        // encoded by the ninfer-5090 port's converter: K16M128x4 block scales, one stored divisor.
+        constexpr std::uint64_t kCodeBytes =
+            static_cast<std::uint64_t>(kKVSize) * static_cast<std::uint64_t>(kHidden / 2);
+        constexpr std::uint64_t kScaleBytes =
+            static_cast<std::uint64_t>(kKVSize) * static_cast<std::uint64_t>(kHidden / 16);
+        if (weight.layout != QuantLayout::BlockScaleK16M128x4 ||
+            weight.scale_dtype != DType::FP8_E4M3FN || weight.group != 16 ||
+            weight.group_size != 16 || weight.ndim != 2 || weight.n != kKVSize ||
+            weight.k != kHidden || weight.shape[0] != kKVSize || weight.shape[1] != kHidden ||
+            weight.padded_shape[0] != kKVSize || weight.padded_shape[1] != kHidden ||
+            weight.qhigh != nullptr || weight.high_plane_bytes != 0 ||
+            weight.payload_bytes < kCodeBytes + kScaleBytes + sizeof(float) ||
+            !aligned_to(weight.qdata, 16) || !aligned_to(weight.scales, 16) ||
+            !std::isfinite(weight.weight_scale_divisor) || weight.weight_scale_divisor <= 0.0F) {
+            throw std::invalid_argument(std::string(kOp) + ": invalid NVFP4 " + name);
+        }
+        return;
+    }
     constexpr std::uint64_t kCodeBytes =
         static_cast<std::uint64_t>(kKVSize) * static_cast<std::uint64_t>(kHidden);
     constexpr std::uint64_t kScaleBytes =
@@ -151,8 +172,15 @@ void context_kv_materialize(
     }
     const std::int32_t padded = static_cast<std::int32_t>(layers.front().cache.padded_capacity);
     const std::int32_t lane_capacity = layers.front().cache.lane_capacity;
+    // The projection family is chosen from layer 0's format, so every layer must share it:
+    // require_weight validates each layer against its own format and would pass a mixed set.
+    const QType shared_qtype = layers.front().key_weight.qtype;
     for (std::size_t index = 0; index < layers.size(); ++index) {
         const ContextKVMaterializeLayerView& layer = layers[index];
+        if (layer.key_weight.qtype != shared_qtype || layer.value_weight.qtype != shared_qtype) {
+            throw std::invalid_argument(
+                "context_kv_materialize: every layer must share one key/value weight format");
+        }
         require_weight(layer.key_weight, "key weight");
         require_weight(layer.value_weight, "value weight");
         require_tensor(layer.key_norm_weight, DType::BF16, kHeadDim, 1, 1, 1, 4, "key norm weight");
@@ -166,6 +194,11 @@ void context_kv_materialize(
     Tensor key_scratch;
     if (detail::context_kv_materialize_uses_scratch(route))
         key_scratch = allocate_key_scratch(workspace, columns);
+    if (shared_qtype == QType::NVFP4) {
+        detail::context_kv_materialize_nvfp4_launch(context, positions, counts, state_slots, layers,
+                                                    envelope, route, key_scratch, stream);
+        return;
+    }
     detail::context_kv_materialize_launch(context, positions, counts, state_slots, layers, envelope,
                                           route, key_scratch, stream);
 }
