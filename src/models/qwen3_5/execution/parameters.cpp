@@ -4,6 +4,8 @@
 #include "core/weight_view.h"
 
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <type_traits>
 #include <stdexcept>
@@ -453,6 +455,23 @@ public:
                     if (layer.mlp_conv) { result.mlp_conv = convolution(*layer.mlp_conv); }
                     return result;
                 }));
+        }
+        if (std::getenv("NINFER_R7_TRACE") != nullptr && !out.layers.empty()) {
+            // R7 diagnostic: the drafter projections' stored format and activation policy
+            // (LinearPolicy: 0 = A16Only); every NVFP4 drafter site should report policy 0.
+            const auto report = [](const char* site, const LinearParameters& p) {
+                std::fprintf(stderr, "[r7] drafter %-14s qtype=%d policy=%d n=%d k=%d\n", site,
+                             static_cast<int>(p.weight.qtype), static_cast<int>(p.policy),
+                             p.weight.n, p.weight.k);
+            };
+            const auto& l0 = out.layers.front();
+            report("feature", out.feature_projection);
+            report("query_key_value", l0.query_key_value);
+            report("context_key", l0.context_key);
+            report("context_value", l0.context_value);
+            report("output", l0.output);
+            report("gate_up", l0.mlp.gate_up);
+            report("down", l0.mlp.down);
         }
         if (w.selector) {
             out.selector = SelectorParameters{linear(w.selector->hidden_projection),

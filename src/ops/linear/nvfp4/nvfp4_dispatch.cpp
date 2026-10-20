@@ -4,6 +4,7 @@
 #include "ops/linear/nvfp4/nvfp4_shapes.h"
 #include "ops/linear/nvfp4/nvfp4_shapes_unified.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/nvfp4/nvfp4_reference.h"
 #include <array>
 #include <stdexcept>
 
@@ -67,6 +68,15 @@ std::size_t nvfp4_linear_workspace_capacity_bytes(std::int32_t n, std::int32_t k
 
 void nvfp4_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                     WorkspaceArena* workspace, cudaStream_t stream) {
+    // R7 diagnostic (NINFER_R7_REFERENCE): the drafter's weight-only sites on the FP32 reference.
+    if (valid_linear_policy(policy) && !allows_a4(policy)) {
+        if (const char* site = nvfp4_reference_linear_site(weight.n, weight.k);
+            site != nullptr && nvfp4_reference_site(site)) {
+            Tensor* outputs[] = {&out};
+            nvfp4_reference_linear(x, weight, outputs, stream);
+            return;
+        }
+    }
     if (x.ne[1] > 0 && (unified_at_every_width(weight.n, weight.k, policy) ||
                         linear_route_table(LinearRouteFamily::Nvfp4, x.ne[1]) ==
                             LinearRouteTable::Unified)) {

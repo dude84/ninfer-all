@@ -47,4 +47,11 @@ void context_kv_materialize_nvfp4_launch(
     ContextKVMaterializeExecutionEnvelope envelope, ContextKVMaterializeRoute route,
     const Tensor& key_scratch, cudaStream_t stream);
 
+// R7 diagnostic (NINFER_R7_REFERENCE=context): the NVFP4 family as a plain FP32 reference loop
+// with the same envelope filter, key-head store and V store. Needs no key scratch.
+void context_kv_materialize_nvfp4_reference_launch(
+    const Tensor& context, const Tensor& positions, const Tensor& counts, const Tensor& state_slots,
+    const std::array<ContextKVMaterializeLayerView, kContextKVMaterializeLayers>& layers,
+    ContextKVMaterializeExecutionEnvelope envelope, cudaStream_t stream);
+
 } // namespace ninfer::ops::detail

@@ -760,6 +760,62 @@ __global__ __launch_bounds__(Rows / 16 * ColumnWarps * 32, 1) void context_kv_mm
     }
 }
 
+// R7 diagnostic (NINFER_R7_REFERENCE=context): the NVFP4 context K/V projection as a plain FP32
+// loop, one thread per output row of one head, sharing nothing with the MMA family but the
+// envelope filter, the key-head store (norm + RoPE) and the V store. Not a production route.
+__global__ __launch_bounds__(128) void context_kv_nvfp4_reference_kernel(
+    const __nv_bfloat16* hidden, const int* positions, const int* counts, const int* slots,
+    DeviceLayers layers, int width, int batch, int min_count, int max_count) {
+    constexpr int kHidden = 5120;
+    __shared__ float head_values[kHeadDim];
+    const int packed_column = static_cast<int>(blockIdx.x);
+    const int layer_index   = static_cast<int>(blockIdx.y);
+    const bool value        = blockIdx.z >= 8;
+    const int head          = static_cast<int>(blockIdx.z) % 8;
+    const int column        = context_column(packed_column, width, max_count);
+    const int request       = column / width;
+    const int count         = counts[request];
+    if (packed_column >= max_count * batch || count < min_count || count > max_count ||
+        column % width >= count) {
+        return;
+    }
+    const auto layer          = layers.layer[layer_index];
+    const auto* codes         = value ? layer.value_codes : layer.key_codes;
+    const auto* scales        = value ? layer.value_scales : layer.key_scales;
+    const float inverse       = value ? layer.value_inverse_divisor : layer.key_inverse_divisor;
+    const int row             = head * kHeadDim + static_cast<int>(threadIdx.x);
+    const __nv_bfloat16* x    = hidden + static_cast<std::int64_t>(column) * kHidden;
+    const std::uint8_t* rowp  = codes + static_cast<std::int64_t>(row) * (kHidden / 2);
+    const int inner           = row % 128;
+    float acc                 = 0.0F;
+    for (int group = 0; group < kHidden / 16; ++group) {
+        const std::int64_t scale_offset =
+            (static_cast<std::int64_t>(row / 128) * (kHidden / 64) + group / 4) * 512 +
+            (inner % 32) * 16 + (inner / 32) * 4 + group % 4;
+        float sum = 0.0F;
+#pragma unroll
+        for (int byte = 0; byte < 8; ++byte) {
+            const float2 pair = decode_nvfp4_e2m1x2(rowp[group * 8 + byte]);
+            sum = fmaf(pair.x, __bfloat162float(x[group * 16 + byte * 2]), sum);
+            sum = fmaf(pair.y, __bfloat162float(x[group * 16 + byte * 2 + 1]), sum);
+        }
+        acc = fmaf(decode_nvfp4_e4m3(scales[scale_offset]), sum, acc);
+    }
+    acc *= inverse;
+    if (value) {
+        const auto dst     = row % 128 + 128LL * ((positions[column] & 2047) +
+                                              (long long)layer.padded_capacity *
+                                                  (row / 128 + 8 * slots[request]));
+        layer.cache_v[dst] = __float2bfloat16_rn(acc);
+        return;
+    }
+    head_values[threadIdx.x] = acc;
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        store_key_head(head_values, layer, positions, slots, column, width, head);
+    }
+}
+
 template <int Rows, int Columns, int BlockK, int ColumnWarps>
 void launch_mma_nvfp4(const Tensor& x, const Tensor& positions, const Tensor& counts,
                       const Tensor& slots, DeviceLayers layers,
@@ -882,6 +938,19 @@ void context_kv_materialize_nvfp4_launch(
         static_cast<const int*>(positions.data), static_cast<const int*>(counts.data),
         static_cast<const int*>(state_slots.data), device_layers, context.ne[2], context.ne[1],
         envelope.min_count, envelope.max_count));
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void context_kv_materialize_nvfp4_reference_launch(
+    const Tensor& context, const Tensor& positions, const Tensor& counts, const Tensor& state_slots,
+    const std::array<ContextKVMaterializeLayerView, kContextKVMaterializeLayers>& layers,
+    ContextKVMaterializeExecutionEnvelope envelope, cudaStream_t stream) {
+    const DeviceLayers device_layers = make_device_layers(layers);
+    context_kv_nvfp4_reference_kernel<<<dim3(envelope.max_count * context.ne[2], kLayers, 16),
+                                        kHeadDim, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(context.data), static_cast<const int*>(positions.data),
+        static_cast<const int*>(counts.data), static_cast<const int*>(state_slots.data),
+        device_layers, context.ne[1], context.ne[2], envelope.min_count, envelope.max_count);
     CUDA_CHECK(cudaGetLastError());
 }
 
