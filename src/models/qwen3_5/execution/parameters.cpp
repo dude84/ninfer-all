@@ -398,9 +398,11 @@ public:
             // R7 diagnostic: the drafter projections' stored format and activation policy
             // (LinearPolicy: 0 = A16Only); every NVFP4 drafter site should report policy 0.
             const auto report = [](const char* site, const LinearParameters& p) {
-                std::fprintf(stderr, "[r7] drafter %-14s qtype=%d policy=%d n=%d k=%d\n", site,
-                             static_cast<int>(p.weight.qtype), static_cast<int>(p.policy),
-                             p.weight.n, p.weight.k);
+                std::fprintf(stderr,
+                             "[r7] drafter %-14s qtype=%d policy=%d n=%d k=%d divisor=%.6g\n",
+                             site, static_cast<int>(p.weight.qtype), static_cast<int>(p.policy),
+                             p.weight.n, p.weight.k,
+                             static_cast<double>(p.weight.weight_scale_divisor));
             };
             const auto& l0 = out.layers.front();
             report("feature", out.feature_projection);
