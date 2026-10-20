@@ -733,6 +733,9 @@ bool ProgramImpl::prepare_active_capture(ActiveCaptureTransaction& transaction) 
         }
     }
 
+    trace_dflash_ring(transaction.publish_shared ? "capture-shared" : "capture-private",
+                      state_store->physical_slot(transaction.source_state), sequence.text_kv_valid,
+                      transaction.lane);
     state_store->freeze(transaction.source_state);
     if (transaction.state_placement == qwen3_5::CaptureStatePlacement::DeviceFork) {
         (void)state_store->begin_fork(transaction.source_state, transaction.destination_state);

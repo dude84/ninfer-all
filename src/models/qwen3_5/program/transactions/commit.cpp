@@ -2,8 +2,11 @@
 #include "models/qwen3_5/program/context_work.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/program/planning/rebuild_work.h"
+#include "core/cyclic_kv_cache.h"
 #include "core/device.h"
 #include "ninfer/ops/sampling.h"
+
+#include <vector>
 
 #include <algorithm>
 #include <array>
@@ -666,6 +669,57 @@ bool ProgramImpl::catch_up_dflash_context(SequenceState& sequence, std::uint32_t
         } catch (...) {}
         return false;
     }
+}
+
+void ProgramImpl::trace_dflash_ring(const char* tag, std::int32_t slot, std::uint32_t frontier,
+                                    std::uint32_t lane) noexcept {
+    if (std::getenv("NINFER_R7_TRACE") == nullptr || !is_masked_draft_backend(speculative_backend) ||
+        !state_images) {
+        return;
+    }
+    try {
+        const CyclicKVCache* ring = state_images->dflash_local();
+        if (ring == nullptr || slot < 0) { return; }
+        device.synchronize();
+        std::uint64_t hash  = 1469598103934665603ULL; // FNV-1a over every layer's K then V
+        std::uint32_t empty = 0, window = 0;
+        std::vector<std::uint16_t> host;
+        for (std::uint32_t layer = 0; layer < ring->layer_count(); ++layer) {
+            const CyclicKVCacheLayerView view = ring->layer_view(layer);
+            for (int plane = 0; plane < 2; ++plane) {
+                const Tensor t = (plane == 0 ? view.k : view.v).slice(3, slot, 1);
+                host.resize(t.bytes() / sizeof(std::uint16_t));
+                CUDA_CHECK(cudaMemcpy(host.data(), t.data, t.bytes(), cudaMemcpyDeviceToHost));
+                for (const std::uint16_t word : host) {
+                    hash = (hash ^ word) * 1099511628211ULL;
+                }
+                if (layer == 0 && plane == 0) {
+                    // [head_dim, padded, heads]: count zero K vectors in the live window.
+                    const std::int64_t head_dim = t.ne[0], padded = t.ne[1], heads = t.ne[2];
+                    const std::uint32_t capacity = view.capacity;
+                    const std::uint32_t first = frontier > capacity ? frontier - capacity : 0U;
+                    for (std::uint32_t position = first; position < frontier; ++position) {
+                        const std::int64_t row = position & (capacity - 1U);
+                        for (std::int64_t head = 0; head < heads; ++head) {
+                            const std::uint16_t* v =
+                                host.data() + (head * padded + row) * head_dim;
+                            bool zero = true;
+                            for (std::int64_t d = 0; d < head_dim && zero; ++d) {
+                                zero = (v[d] & 0x7fffU) == 0;
+                            }
+                            empty += zero ? 1U : 0U;
+                            ++window;
+                        }
+                    }
+                }
+            }
+        }
+        std::fprintf(stderr,
+                     "[r7] ring %s lane=%u slot=%d frontier=%u hash=%016llx zero_k=%u/%u\n", tag,
+                     static_cast<unsigned>(lane), static_cast<int>(slot),
+                     static_cast<unsigned>(frontier), static_cast<unsigned long long>(hash), empty,
+                     window);
+    } catch (...) {}
 }
 
 FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {

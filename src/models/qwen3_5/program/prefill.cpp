@@ -340,6 +340,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                 if (is_masked_draft_backend(speculative_backend)) {
                     state_images->copy_dflash_local(selectors.source, selectors.destination,
                                                     device.stream);
+                    trace_dflash_ring(private_source_ready ? "restore-private-source"
+                                                           : "restore-shared-source",
+                                      selectors.source, base, lane);
                 }
                 sequence.state = ActiveStateBinding{
                     .read           = selected,
@@ -348,6 +351,8 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                     .read_ownership = StateReadOwnership::ExternalOwner,
                 };
             }
+            trace_dflash_ring(private_source_ready ? "restore-private" : "restore-shared",
+                              state_store->physical_slot(sequence.state.write), base, lane);
             transaction.reserved_states[0]   = {};
             transaction.split_state_identity = false;
             if (state_slots == 2) {
