@@ -21,6 +21,8 @@
 #include <bit>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <cstring>
 #include <limits>
@@ -891,6 +893,16 @@ StartResult ProgramImpl::hybrid_activate(HybridMaterializationTransaction& trans
             sequence.mtp_kv_valid  = prepare_mtp ? reuse - 1U : 0U;
             sequence.dflash_context_frontier =
                 is_masked_draft_backend(speculative_backend) ? reuse : 0U;
+        }
+        if (std::getenv("NINFER_R7_TRACE") != nullptr) {
+            // R7 diagnostic: which reuse path and snapshot kind each admission took, so per-request
+            // drafter acceptance can be split by path (no prompt text is printed).
+            std::fprintf(stderr,
+                         "[r7] admit lane=%u prompt=%u reuse=%u path=%d snapshot_kind=%d\n",
+                         static_cast<unsigned>(lane), static_cast<unsigned>(n),
+                         static_cast<unsigned>(reuse),
+                         static_cast<int>(quote.summary.prefix_reuse_path),
+                         reuse != 0 ? static_cast<int>(snapshot.kind) : -1);
         }
         sequence.endpoint_valid    = false;
         sequence.tail_hidden_valid = false;
