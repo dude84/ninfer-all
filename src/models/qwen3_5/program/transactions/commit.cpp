@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <span>
@@ -632,6 +634,40 @@ DiscardResult ProgramImpl::abort_pending(PendingBatch&& pending) noexcept {
     return out;
 }
 
+bool ProgramImpl::catch_up_dflash_context(SequenceState& sequence, std::uint32_t lane) noexcept {
+    if (!is_masked_draft_backend(speculative_backend)) { return true; }
+    if (sequence.dflash_context_frontier >= sequence.execution_frontier) { return true; }
+    if (!dflash || !io.dflash_decode || !sequence.kv || sequence.state.fork_pending) {
+        return false;
+    }
+    try {
+        // The port normalizes before it saves a snapshot (session/pause.cpp): the pending target
+        // features of the last non-terminal round are appended to the draft ring first. Here they
+        // would otherwise be lost: they live in the lane's pending plane, not in the StateImage.
+        const std::array<std::uint32_t, 1> append_lanes{lane};
+        const std::array<std::uint32_t, 1> append_starts{sequence.dflash_context_frontier};
+        const std::array<std::uint32_t, 1> append_counts{sequence.execution_frontier -
+                                                         sequence.dflash_context_frontier};
+        bind_sequence_kv(sequence);
+        enqueue_dflash_context_append(append_lanes, append_starts, append_counts);
+        device.synchronize();
+        sequence.dflash_context_frontier = sequence.execution_frontier;
+        commit_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
+        work.reset();
+        if (std::getenv("NINFER_R7_TRACE") != nullptr) {
+            std::fprintf(stderr, "[r7] endpoint catch-up lane=%u appended=%u frontier=%u\n",
+                         static_cast<unsigned>(lane), static_cast<unsigned>(append_counts[0]),
+                         static_cast<unsigned>(sequence.execution_frontier));
+        }
+        return true;
+    } catch (...) {
+        try {
+            work.reset();
+        } catch (...) {}
+        return false;
+    }
+}
+
 FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
     FinishResult out;
     if (has_context_transaction() || pending_transaction_ || !valid_sequence(sequence)) {
@@ -646,6 +682,7 @@ FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
         // Hybrid mode retains context in the prefix index, never as a catalogued continuation.
         out.timings     = request.timings;
         out.speculative = std::move(request.speculative_stats);
+        (void)catch_up_dflash_context(state, lane);
         if (!hybrid_finish_lane(state, request, lane, true)) { return out; }
         out.disposition = runtime::FinishDisposition::Released;
         invalidate_lane(lane);
@@ -679,6 +716,9 @@ FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
             state.state = ActiveStateBinding{.read = source, .write = source};
         }
     } catch (...) { return out; }
+    // The endpoint must hold the draft context up to its frontier (port: session/pause.cpp).
+    // On failure the endpoint publishes as before (its draft frontier stays behind).
+    (void)catch_up_dflash_context(state, lane);
     if (!publish_active_continuation(state, request, lane, continuation_index, out.summary)) {
         return out;
     }
@@ -763,7 +803,7 @@ bool ProgramImpl::salvage_continuation(SequenceState& state, RequestControl& req
         }
         // A DFlash draft context that lags the salvaged frontier cannot be truncated to it on
         // materialization, so only a caught-up backend can be published.
-        if (speculative_backend == SpeculativeBackend::DFlash &&
+        if (is_masked_draft_backend(speculative_backend) &&
             state.dflash_context_frontier < frontier) {
             return false;
         }
@@ -797,7 +837,9 @@ bool ProgramImpl::salvage_continuation(SequenceState& state, RequestControl& req
         if (frontier < kSalvageMinFrontier || state.text_kv_valid != frontier) { return false; }
         if (speculative_backend == SpeculativeBackend::Mtp) {
             if (state.mtp_kv_valid + 1 < frontier) { return false; }
-        } else if (speculative_backend == SpeculativeBackend::DFlash) {
+        } else if (is_masked_draft_backend(speculative_backend)) {
+            // DFlash2 too: a lagging draft ring published as an endpoint has a hole that the
+            // next request's restore cannot fill (catch_up_dflash_context runs before this).
             if (state.dflash_context_frontier < frontier) { return false; }
         }
     } else {
@@ -969,6 +1011,12 @@ AbortResult ProgramImpl::abort(SequenceHandle sequence) noexcept {
     try {
         device.synchronize();
     } catch (...) { return out; }
+    // A request stopped between rounds (a client stop, a stop sequence, a disconnect) leaves its
+    // last round's target features pending; append them before the state can be published.
+    if ((request.lifecycle == Lifecycle::Active || request.lifecycle == Lifecycle::Finishable) &&
+        state.kv && !state.state.fork_pending && state.text_kv_valid == state.execution_frontier) {
+        (void)catch_up_dflash_context(state, lane);
+    }
     if (hybrid_) {
         // The committed state is publishable as an endpoint when no model unit is in flight.
         out.timings     = request.timings;
