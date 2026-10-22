@@ -42,6 +42,8 @@
 #include "ninfer/ops/silu_mul.h"
 #include "ninfer/ops/softmax_attention.h"
 
+#include <cstdlib>
+#include <fstream>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -252,6 +254,12 @@ TextContext::TextContext(DeviceContext& ctx, const execution::Parameters& weight
         throw std::invalid_argument("MTP TextContext requires MTP round state");
     }
     set_linear_state_slots(0, 0);
+    if (const char* tap = std::getenv("NINFER_R1_TAP"); tap != nullptr && *tap != '\0') {
+        r1_tap_.path   = tap;
+        r1_tap_.layers = static_cast<std::uint32_t>(parameters_.text.layers.size());
+        r1_tap_.hidden = static_cast<std::uint32_t>(config_.hidden_size);
+        r1_tap_.host.assign(static_cast<std::size_t>(r1_tap_.layers) * r1_tap_.hidden, 0);
+    }
     embed_      = &parameters_.text.token_embedding;
     final_norm_ = &parameters_.text.final_norm;
     lm_head_    = &parameters_.text.output_head;
@@ -1188,6 +1196,37 @@ GdnReplayRecordLayer TextContext::replay_layer(std::uint32_t layer, std::int32_t
                                                         batch, width);
 }
 
+// R1 phase 1 tap (see text.h): the last column of this prefill chunk is the last prompt token.
+void TextContext::r1_tap_capture(std::uint32_t layer, const Tensor& x, cudaStream_t stream) {
+    if (x.dtype != DType::BF16 || x.ne[0] != static_cast<std::int32_t>(r1_tap_.hidden) || x.ne[1] < 1 ||
+        layer >= r1_tap_.layers) {
+        throw std::logic_error("R1 tap: residual shape does not match [hidden, columns] BF16");
+    }
+    const auto* column = static_cast<const std::byte*>(x.data) +
+                         static_cast<std::size_t>(x.ne[1] - 1) * static_cast<std::size_t>(x.nb[1]);
+    CUDA_CHECK(cudaMemcpyAsync(r1_tap_.host.data() + static_cast<std::size_t>(layer) * r1_tap_.hidden,
+                               column, static_cast<std::size_t>(r1_tap_.hidden) * sizeof(std::uint16_t),
+                               cudaMemcpyDeviceToHost, stream));
+}
+
+void TextContext::r1_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream) {
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    struct Header {
+        char magic[8] = {'R', '1', 'T', 'A', 'P', '0', '1', '\0'};
+        std::uint32_t layers = 0, hidden = 0, prompt_tokens = 0, dtype_bf16 = 1;
+        std::uint64_t index = 0;
+    } header;
+    header.layers        = r1_tap_.layers;
+    header.hidden        = r1_tap_.hidden;
+    header.prompt_tokens = prompt_tokens;
+    header.index         = r1_tap_.records++;
+    std::ofstream out(r1_tap_.path, std::ios::binary | std::ios::app);
+    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+    out.write(reinterpret_cast<const char*>(r1_tap_.host.data()),
+              static_cast<std::streamsize>(r1_tap_.host.size() * sizeof(std::uint16_t)));
+    if (!out) { throw std::runtime_error("R1 tap: cannot append to " + r1_tap_.path); }
+}
+
 // The layers of one stage, in order. On one device this is the whole model.
 template <class Tap>
 void TextContext::run_stage_layers(std::size_t stage, Tensor& x, Phase ph, Tap& tap) {
@@ -1232,6 +1271,7 @@ void TextContext::run_stage_layers(std::size_t stage, Tensor& x, Phase ph, Tap& 
             if constexpr (Tap::enabled) {
                 tap.capture_layer(static_cast<int>(layer), x, ctx_.stream);
             }
+            if (prefill && r1_tap_.armed) { r1_tap_capture(layer, x, ctx_.stream); }
         } catch (const std::exception& error) {
             throw std::runtime_error("text/layers/" + std::to_string(layer) +
                                      (prefill ? " prefill" : " verify") +
@@ -1618,7 +1658,12 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 ops::scatter(embeddings, indices_device, x, s);
             }
             if constexpr (Tap::enabled) { tap.begin(x); }
+            r1_tap_.armed = is_last && !r1_tap_.path.empty();
             run_layers(x, Phase::Prefill, tap);
+            if (r1_tap_.armed) {
+                r1_tap_.armed = false;
+                r1_tap_flush(prompt_t0 + static_cast<std::uint32_t>(len), s);
+            }
             if constexpr (requires { tap.capture_positions(positions, s); }) {
                 tap.capture_positions(positions, s);
             }

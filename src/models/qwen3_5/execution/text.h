@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <functional>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace ninfer::models::qwen3_5::execution {
@@ -297,6 +298,20 @@ private:
     Tensor* rewrite_checkpoint_hidden_output_ = nullptr;
     std::uint32_t mtp_proposal_extent_        = 0;
     std::span<const cudaEvent_t> layer_ready_;
+    // R1 phase 1 (llm-lab dev branch r1-runtime-uncensor): with NINFER_R1_TAP=<file>, each prompt whose last
+    // prefill chunk runs here appends one record to <file>: the residual stream after every layer at the last
+    // prompt token, R1TapHeader then [layers, hidden] BF16. Floats and counts only, never tokens or text.
+    struct R1Tap {
+        std::string path;
+        std::uint32_t layers = 0;
+        std::uint32_t hidden = 0;
+        std::vector<std::uint16_t> host;   // [layers, hidden], filled by stream-ordered copies
+        bool armed           = false;
+        std::uint64_t records = 0;
+    };
+    R1Tap r1_tap_;
+    void r1_tap_capture(std::uint32_t layer, const Tensor& x, cudaStream_t stream);
+    void r1_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream);
 
     const Weight* embed_                        = nullptr;
     const Tensor* final_norm_                   = nullptr;
