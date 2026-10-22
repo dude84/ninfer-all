@@ -1230,8 +1230,19 @@ void TextContext::r1_load_directions(const char* path) {
     std::vector<float> host(static_cast<std::size_t>(layers) * hidden);
     in.read(reinterpret_cast<char*>(host.data()), static_cast<std::streamsize>(host.size() * sizeof(float)));
     if (!in) { throw std::runtime_error(std::string("NINFER_R1_DIRECTIONS: short file ") + path); }
-    CUDA_CHECK(cudaMalloc(&r1_directions_, host.size() * sizeof(float)));
-    CUDA_CHECK(cudaMemcpy(r1_directions_, host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice));
+    // Text contexts are built while the engine captures its CUDA graphs, where a plain cudaMalloc is refused: the one
+    // upload runs in relaxed capture mode, once per process (every context of the process shares it).
+    static float* shared_directions = nullptr;
+    static std::string shared_path;
+    if (shared_directions == nullptr || shared_path != path) {
+        cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
+        CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
+        CUDA_CHECK(cudaMalloc(&shared_directions, host.size() * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(shared_directions, host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
+        shared_path = path;
+    }
+    r1_directions_ = shared_directions;
     const char* alpha  = std::getenv("NINFER_R1_ALPHA");
     const char* range  = std::getenv("NINFER_R1_LAYERS");
     const char* source = std::getenv("NINFER_R1_SOURCE_LAYER");
