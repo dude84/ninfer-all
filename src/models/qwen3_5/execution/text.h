@@ -310,6 +310,16 @@ private:
         std::uint64_t records = 0;
     };
     R1Tap r1_tap_;
+    // R1 phase 2: with NINFER_R1_DIRECTIONS=<file> (R1DIR01: header + [layers, hidden] FP32 unit vectors), every
+    // layer in NINFER_R1_LAYERS (default all, "a-b" inclusive) removes alpha (NINFER_R1_ALPHA, default 1) times the
+    // residual's component along its direction, or along layer NINFER_R1_SOURCE_LAYER's for every layer when set.
+    // One process-wide setting: the startup-captured graphs include it.
+    float* r1_directions_    = nullptr;  // device [layers, hidden]
+    float r1_alpha_          = 0.0f;
+    std::uint32_t r1_begin_  = 0;
+    std::uint32_t r1_end_    = 0;
+    std::int32_t r1_source_  = -1;
+    void r1_load_directions(const char* path);
     void r1_tap_capture(std::uint32_t layer, const Tensor& x, cudaStream_t stream);
     void r1_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream);
 

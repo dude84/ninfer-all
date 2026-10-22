@@ -23,6 +23,7 @@
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/logprob_topk.h"
 #include "ninfer/ops/readout_logprobs.h"
+#include "ninfer/ops/r1_project.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/speculative_round.h"
@@ -42,6 +43,7 @@
 #include "ninfer/ops/silu_mul.h"
 #include "ninfer/ops/softmax_attention.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <cuda_runtime.h>
@@ -259,6 +261,9 @@ TextContext::TextContext(DeviceContext& ctx, const execution::Parameters& weight
         r1_tap_.layers = static_cast<std::uint32_t>(parameters_.text.layers.size());
         r1_tap_.hidden = static_cast<std::uint32_t>(config_.hidden_size);
         r1_tap_.host.assign(static_cast<std::size_t>(r1_tap_.layers) * r1_tap_.hidden, 0);
+    }
+    if (const char* dirs = std::getenv("NINFER_R1_DIRECTIONS"); dirs != nullptr && *dirs != '\0') {
+        r1_load_directions(dirs);
     }
     embed_      = &parameters_.text.token_embedding;
     final_norm_ = &parameters_.text.final_norm;
@@ -1209,6 +1214,44 @@ void TextContext::r1_tap_capture(std::uint32_t layer, const Tensor& x, cudaStrea
                                cudaMemcpyDeviceToHost, stream));
 }
 
+void TextContext::r1_load_directions(const char* path) {
+    std::ifstream in(path, std::ios::binary);
+    char magic[8] = {};
+    std::uint32_t layers = 0, hidden = 0;
+    in.read(magic, sizeof(magic));
+    in.read(reinterpret_cast<char*>(&layers), sizeof(layers));
+    in.read(reinterpret_cast<char*>(&hidden), sizeof(hidden));
+    const auto model_layers = static_cast<std::uint32_t>(parameters_.text.layers.size());
+    if (!in || std::string(magic, 7) != "R1DIR01" || layers != model_layers ||
+        hidden != static_cast<std::uint32_t>(config_.hidden_size)) {
+        throw std::runtime_error(std::string("NINFER_R1_DIRECTIONS: ") + path + " is not an R1DIR01 file for " +
+                                 std::to_string(model_layers) + " x " + std::to_string(config_.hidden_size));
+    }
+    std::vector<float> host(static_cast<std::size_t>(layers) * hidden);
+    in.read(reinterpret_cast<char*>(host.data()), static_cast<std::streamsize>(host.size() * sizeof(float)));
+    if (!in) { throw std::runtime_error(std::string("NINFER_R1_DIRECTIONS: short file ") + path); }
+    CUDA_CHECK(cudaMalloc(&r1_directions_, host.size() * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(r1_directions_, host.data(), host.size() * sizeof(float), cudaMemcpyHostToDevice));
+    const char* alpha  = std::getenv("NINFER_R1_ALPHA");
+    const char* range  = std::getenv("NINFER_R1_LAYERS");
+    const char* source = std::getenv("NINFER_R1_SOURCE_LAYER");
+    r1_alpha_ = alpha != nullptr && *alpha != '\0' ? std::stof(alpha) : 1.0f;
+    r1_begin_ = 0;
+    r1_end_   = layers - 1;
+    if (range != nullptr && *range != '\0') {
+        const std::string text(range);
+        const auto dash = text.find('-');
+        r1_begin_ = static_cast<std::uint32_t>(std::stoul(text.substr(0, dash)));
+        r1_end_   = dash == std::string::npos ? r1_begin_ : static_cast<std::uint32_t>(std::stoul(text.substr(dash + 1)));
+    }
+    r1_source_ = source != nullptr && *source != '\0' ? std::stoi(source) : -1;
+    if (r1_begin_ > r1_end_ || r1_end_ >= layers || r1_source_ >= static_cast<std::int32_t>(layers)) {
+        throw std::runtime_error("NINFER_R1_LAYERS / NINFER_R1_SOURCE_LAYER out of range");
+    }
+    std::fprintf(stderr, "R1 directions %s: layers %u-%u, alpha %.3f, source %s\n", path, r1_begin_, r1_end_,
+                 static_cast<double>(r1_alpha_), r1_source_ >= 0 ? std::to_string(r1_source_).c_str() : "per layer");
+}
+
 void TextContext::r1_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream) {
     CUDA_CHECK(cudaStreamSynchronize(stream));
     struct Header {
@@ -1267,6 +1310,11 @@ void TextContext::run_stage_layers(std::size_t stage, Tensor& x, Phase ph, Tap& 
                 mlp_tail(block, x, ph,
                          layer + 1 < end ? next_projection_hints(static_cast<int>(layer))
                                          : ops::SparseMoeHints{});
+            }
+            if (r1_directions_ != nullptr && layer >= r1_begin_ && layer <= r1_end_) {
+                const auto row = static_cast<std::size_t>(r1_source_ >= 0 ? r1_source_ : layer);
+                ops::r1_project(x, r1_directions_ + row * static_cast<std::size_t>(config_.hidden_size), r1_alpha_,
+                                ctx_.stream);
             }
             if constexpr (Tap::enabled) {
                 tap.capture_layer(static_cast<int>(layer), x, ctx_.stream);
