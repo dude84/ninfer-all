@@ -210,6 +210,11 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
     load.experts      = options.expert_residency;
     load.vision       = options.enable_vision;
     load.mtp          = mtp;
+    // RR, refusal removal (llm-lab dev branch): the residual projection and its directions.
+    load.rr_directions = options.rr_directions;
+    load.rr_layer      = options.rr_layer;
+    load.rr_strength   = options.rr_strength;
+    load.rr_layers     = options.rr_layers;
     StartupPhaseScope materialize(options.startup_observer, StartupPhase::TargetPlan);
     auto model = models::qwen4_exp::load_model(reader, load, device, &options.startup_observer);
     device.synchronize();
@@ -1666,6 +1671,7 @@ struct Qwen4ExpCore::Impl {
         // The next step's table rows are read while this one runs.
         const auto next = prompt.subspan(r.prefilled + n,
                                          std::min(executor.prompt_step(), prompt_n - r.prefilled - n));
+        if (r.prefilled + n == prompt_n) { executor.rr_tap_last_chunk(); }
         executor.forward(r.slot, chunk, 1, next);
         slot.fed.insert(slot.fed.end(), chunk.begin(), chunk.end());
         r.prefilled += n;

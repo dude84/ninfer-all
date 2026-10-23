@@ -37,6 +37,7 @@
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/rmsnorm_rope.h"
 #include "ninfer/ops/rope.h"
+#include "ninfer/ops/rr_project.h"
 #include "ninfer/ops/scatter.h"
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ninfer/ops/sparse_attention.h"
@@ -45,7 +46,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <future>
 #include <numeric>
 #include <optional>
@@ -727,6 +731,33 @@ struct Executor::Impl {
     qwen3_5::execution::VisionWorkspacePlan vision_plan;
     DeviceBuffer vision_backing, vision_embeddings;
 
+    // RR, refusal removal (llm-lab dev branch r1-runtime-uncensor). With --rr-directions <file>
+    // (RRDIR01: header + [layers, hidden] FP32 unit vectors), every layer in --rr-layers (default
+    // all) removes --rr-strength times the residual's component along a direction (layer
+    // --rr-layer's for every layer when given, else each layer's own) from every stream of the
+    // stack, after the layer's MoE write and before the next layer's read; the passes then take the
+    // un-fused write and read (rr_boundary). Prefill, decode, verification and their graphs alike;
+    // the MTP block's own layer is not projected.
+    std::vector<DeviceBuffer> rr_directions; // by rank, FP32 [layers, hidden]; empty: off
+    float rr_strength       = 0.0f;
+    std::uint32_t rr_begin  = 0;
+    std::uint32_t rr_end    = 0;
+    std::int32_t rr_source  = -1;
+    // Calibration tap: with NINFER_RR_TAP=<file>, a prompt's last chunk (rr_tap_last_chunk())
+    // appends one record to <file>: an RRTAP01 header, then for every layer the mean of the
+    // stack's four streams at the last prompt token after the layer's MoE write, as BF16 [layers,
+    // hidden] (dtype_bf16 = 1, the Qwen3.5 tap's layout). Floats and counts only, never tokens or
+    // text.
+    struct RRTap {
+        std::string path;
+        // FP32 [layers, streams, hidden], pinned: the copies stay asynchronous.
+        std::unique_ptr<PinnedHostBuffer> host;
+        bool requested        = false;
+        bool armed            = false;
+        std::uint64_t records = 0;
+    };
+    RRTap rr_tap;
+
     Impl(const Model& m, DeviceContext& d, ExecutorOptions o)
         : model(m), device(d), options(std::move(o)), config(m.config()),
           ngram(derive_ngram_hash_constants(config.ngram)) {
@@ -821,6 +852,12 @@ struct Executor::Impl {
         if (verify_width > 0) { allocate_speculation(); }
         allocate_span();
         allocate_cache();
+        if (!model.options().rr_directions.empty()) { rr_load(); }
+        if (const char* tap = std::getenv("NINFER_RR_TAP"); tap != nullptr && *tap != '\0') {
+            rr_tap.path = tap;
+            rr_tap.host = std::make_unique<PinnedHostBuffer>(
+                layers.size() * config.hc_count * config.hidden_size * sizeof(float));
+        }
         memory.streamed_kv = stream_slots != 0;
         for (const auto& rank : memory.ranks) {
             memory.state_bytes += rank.state_bytes;
@@ -2732,6 +2769,115 @@ struct Executor::Impl {
         ops::moe_experts_gguf(mixed, ids, weights, shared, m.banks(), ws, y, s);
     }
 
+    void rr_load() {
+        const LoadOptions& o    = model.options();
+        const std::string& path = o.rr_directions;
+        std::ifstream in(path, std::ios::binary);
+        char magic[8]        = {};
+        std::uint32_t count  = 0, hidden = 0;
+        in.read(magic, sizeof(magic));
+        in.read(reinterpret_cast<char*>(&count), sizeof(count));
+        in.read(reinterpret_cast<char*>(&hidden), sizeof(hidden));
+        const auto model_layers = static_cast<std::uint32_t>(layers.size());
+        const std::string tag(magic, 7); // R1DIR01 = the same layout, written before the rename
+        if (!in || (tag != "RRDIR01" && tag != "R1DIR01") || count != model_layers ||
+            hidden != config.hidden_size) {
+            throw std::runtime_error("--rr-directions: " + path + " is not an RRDIR01 file for " +
+                                     std::to_string(model_layers) + " x " +
+                                     std::to_string(config.hidden_size));
+        }
+        std::vector<float> host(std::size_t(count) * hidden);
+        in.read(reinterpret_cast<char*>(host.data()),
+                static_cast<std::streamsize>(host.size() * sizeof(float)));
+        if (!in) { throw std::runtime_error("--rr-directions: short file " + path); }
+        rr_begin = 0;
+        rr_end   = count - 1;
+        if (!o.rr_layers.empty()) {
+            const auto dash = o.rr_layers.find('-');
+            rr_begin        = static_cast<std::uint32_t>(std::stoul(o.rr_layers.substr(0, dash)));
+            rr_end          = dash == std::string::npos
+                                  ? rr_begin
+                                  : static_cast<std::uint32_t>(
+                                        std::stoul(o.rr_layers.substr(dash + 1)));
+        }
+        rr_source = o.rr_layer;
+        if (rr_begin > rr_end || rr_end >= count || rr_source >= static_cast<std::int32_t>(count)) {
+            throw std::runtime_error("--rr-layers / --rr-layer out of range for " +
+                                     std::to_string(count) + " layers");
+        }
+        // Built with the executor, before any graph is captured: a copy on every rank's device.
+        for (std::size_t r = 0; r < device.size(); ++r) {
+            RankBinding bind(device, r);
+            DeviceBuffer& directions = rr_directions.emplace_back(host.size() * sizeof(float));
+            directions.copy_from_host(host.data(), host.size() * sizeof(float));
+        }
+        rr_strength = o.rr_strength;
+        std::fprintf(stderr,
+                     "RR directions %s: layers %u-%u, strength %.3f, direction of %s, all %d "
+                     "streams\n",
+                     path.c_str(), rr_begin, rr_end, static_cast<double>(rr_strength),
+                     rr_source >= 0 ? ("layer " + std::to_string(rr_source)).c_str() : "each layer",
+                     static_cast<int>(config.hc_count));
+    }
+
+    // Whether the passes write each layer's MoE output into the stack on its own (RR projects or
+    // taps the stack between the write and the next read).
+    [[nodiscard]] bool rr_unfused() const noexcept {
+        return !rr_directions.empty() || rr_tap.armed;
+    }
+
+    // The block boundary after layer `i`'s MoE write, `stack` FP32 [hidden, streams, t] on `rank`:
+    // the RR projection of every column, and with `tap` the last token's streams.
+    void rr_boundary(std::size_t i, const RankState& rank, float* stack, std::int32_t t, bool tap,
+                     cudaStream_t s) {
+        const auto h  = static_cast<std::int32_t>(config.hidden_size);
+        const auto hc = static_cast<std::int32_t>(config.hc_count);
+        if (!rr_directions.empty() && i >= rr_begin && i <= rr_end) {
+            Tensor columns(stack, DType::FP32, {h, hc * t});
+            const auto row = std::size_t(rr_source >= 0 ? std::size_t(rr_source) : i);
+            const auto* u = static_cast<const float*>(rr_directions[rank.rank].p);
+            ops::rr_project(columns, u + row * std::size_t(h), rr_strength, s);
+        }
+        if (tap) {
+            const std::size_t width = std::size_t(hc) * std::size_t(h);
+            CUDA_CHECK(cudaMemcpyAsync(static_cast<float*>(rr_tap.host->data()) + i * width,
+                                       stack + std::size_t(t - 1) * width, width * sizeof(float),
+                                       cudaMemcpyDeviceToHost, s));
+        }
+    }
+
+    // Appends the armed tap's record: the mean of the four streams per layer, rounded to BF16.
+    void rr_tap_flush(std::uint32_t prompt_tokens) {
+        synchronize_ranks();
+        struct Header {
+            char magic[8] = {'R', 'R', 'T', 'A', 'P', '0', '1', '\0'};
+            std::uint32_t layers = 0, hidden = 0, prompt_tokens = 0, dtype_bf16 = 1;
+            std::uint64_t index = 0;
+        } header;
+        const std::size_t h  = config.hidden_size;
+        const std::size_t hc = config.hc_count;
+        header.layers        = static_cast<std::uint32_t>(layers.size());
+        header.hidden        = static_cast<std::uint32_t>(h);
+        header.prompt_tokens = prompt_tokens;
+        header.index         = rr_tap.records++;
+        std::vector<std::uint16_t> values(layers.size() * h);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            const float* streams =
+                static_cast<const float*>(rr_tap.host->data()) + (i / h) * hc * h + i % h;
+            float mean           = 0.0f;
+            for (std::size_t c = 0; c < hc; ++c) { mean += streams[c * h]; }
+            mean /= static_cast<float>(hc);
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &mean, sizeof(bits));
+            values[i] = static_cast<std::uint16_t>((bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16);
+        }
+        std::ofstream out(rr_tap.path, std::ios::binary | std::ios::app);
+        out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        out.write(reinterpret_cast<const char*>(values.data()),
+                  static_cast<std::streamsize>(values.size() * sizeof(std::uint16_t)));
+        if (!out) { throw std::runtime_error("RR tap: cannot append to " + rr_tap.path); }
+    }
+
     // Queues one segment of the pass for the parts' `t` tokens on its rank's stream; with `head`,
     // the logits of the last `logit_rows` tokens.
     void run_segment(std::span<const Part> parts, const Segment& segment, std::int32_t t,
@@ -2755,15 +2901,19 @@ struct Executor::Impl {
             ops::hyper_connection_expand(mixed, stack, rank.stream);
         }
         // A layer's MoE output is written into the stack by the next layer's read, which takes
-        // the same rounding, unless the PLE comes between.
+        // the same rounding, unless the PLE or RR (rr_boundary) comes between.
         Tensor inject(rank.inject, DType::FP32, {hc, t});
         const Tensor moe_out(rank.y, DType::FP32, {h, t});
-        bool pending = false;
+        const bool unfused = rr_unfused();
+        bool pending       = false;
         for (std::size_t i = segment.begin; i < segment.end; ++i) {
             const LayerPlan& plan = layers[i];
-            if (plan.ple) {
-                if (pending) { ops::hyper_connection_write(stack, moe_out, inject, rank.stream); }
+            if (pending && (plan.ple || unfused)) {
+                ops::hyper_connection_write(stack, moe_out, inject, rank.stream);
+                rr_boundary(i - 1, rank, rank.stack, t, rr_tap.armed, rank.stream);
                 pending = false;
+            }
+            if (plan.ple) {
                 for (const Part& part : parts) {
                     run_ple(plan, part.sequence->layers[i], rank, part);
                 }
@@ -2797,7 +2947,12 @@ struct Executor::Impl {
             run_moe(plan, rank, t, i);
             pending = true;
         }
-        if (pending) { ops::hyper_connection_write(stack, moe_out, inject, rank.stream); }
+        if (pending) {
+            ops::hyper_connection_write(stack, moe_out, inject, rank.stream);
+            if (unfused) {
+                rr_boundary(segment.end - 1, rank, rank.stack, t, rr_tap.armed, rank.stream);
+            }
+        }
         if (!segment.head) { return; }
         const auto n = static_cast<std::int32_t>(logit_rows);
         const Tensor last(rank.stack + std::size_t(hc) * h * (t - n), DType::FP32, {h, hc, n});
@@ -2870,7 +3025,9 @@ struct Executor::Impl {
         SequenceState& first = *parts.front().sequence;
         // Staged misses keep disk experts' decode and verification free of host synchronization.
         const bool host_free = !stream || misses;
-        const bool graph     = options.cuda_graphs && t == 1 && host_free && !verifying;
+        // A tapped prompt chunk copies to the host between layers, which a graph would not.
+        const bool graph =
+            options.cuda_graphs && t == 1 && host_free && !verifying && !rr_tap.armed;
         const bool verify_graph = options.cuda_graphs && verifying && parts.size() == 1 &&
                                   host_free && t <= kVectorTokens;
         if (misses) { misses->keep_alive(); }
@@ -3172,14 +3329,24 @@ struct Executor::Impl {
                     span_hold = last < chunks;
                     Tensor stack(rank.stack, DType::FP32, {h, hc, t});
                     Tensor inject(rank.inject, DType::FP32, {hc, t});
+                    // RR: the chunk's or group's stack after the write; the last group ends with
+                    // the tap's token.
+                    const auto boundary = [&] {
+                        const bool tap = rr_tap.armed && last == chunks;
+                        if (!rr_directions.empty() || tap) {
+                            rr_boundary(i, rank, rank.stack, t, tap, st);
+                        }
+                    };
                     if (last == k + 1) {
                         run_moe(plan, rank, t, i);
                         ops::hyper_connection_write(stack, Tensor(rank.y, DType::FP32, {h, t}),
                                                     inject, st);
+                        boundary();
                     } else {
                         run_group(plan, rank, i, k, last, n, c);
                         ops::hyper_connection_write(stack, Tensor(span_y.p, DType::FP32, {h, t}),
                                                     inject, st);
+                        boundary();
                         if (last == chunks) {
                             // record_routes() reads the last chunk's routes from the layer's
                             // record, where run_moe() leaves them.
@@ -3241,6 +3408,22 @@ struct Executor::Impl {
 
     void forward(std::uint32_t s, std::span<const std::int32_t> tokens, std::uint32_t logit_rows,
                  std::span<const std::int32_t> next) {
+        // RR calibration tap: armed for this call when it is a prompt's last chunk.
+        rr_tap.armed = std::exchange(rr_tap.requested, false);
+        try {
+            forward_chunks(s, tokens, logit_rows, next);
+        } catch (...) {
+            rr_tap.armed = false;
+            throw;
+        }
+        if (rr_tap.armed) {
+            rr_tap_flush(sequences.at(s).position);
+            rr_tap.armed = false;
+        }
+    }
+
+    void forward_chunks(std::uint32_t s, std::span<const std::int32_t> tokens,
+                        std::uint32_t logit_rows, std::span<const std::int32_t> next) {
         if (next.size() > prompt_step()) {
             throw std::invalid_argument("qwen4_exp forward: more next tokens than a prompt step");
         }
@@ -4121,6 +4304,9 @@ std::uint64_t Executor::ngram_resident_bytes() const noexcept {
 void Executor::reset(std::uint32_t sequence) { impl_->reset(sequence); }
 
 void Executor::warm_up() { impl_->warm_up(); }
+
+void Executor::rr_tap_last_chunk() { impl_->rr_tap.requested = !impl_->rr_tap.path.empty(); }
+
 std::uint32_t Executor::prompt_step() const noexcept { return impl_->prompt_step(); }
 void Executor::grow_expert_cache(std::uint64_t keep_free_bytes) {
     impl_->grow_expert_cache(keep_free_bytes);

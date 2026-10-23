@@ -167,6 +167,9 @@ public:
     // read while the device runs `tokens`.
     void forward(std::uint32_t sequence, std::span<const std::int32_t> tokens,
                  std::uint32_t logit_rows, std::span<const std::int32_t> next = {});
+    // RR calibration tap (llm-lab dev branch): the next forward() is a prompt's last chunk, which
+    // with NINFER_RR_TAP=<file> appends its record to <file>. No effect without the variable.
+    void rr_tap_last_chunk();
     // Runs one token of each of `sequences` (distinct) at its next position in one pass, and
     // leaves their logits in logits(), one column per sequence in that order. The experts read
     // their weights once for the whole batch; each sequence's mixers run on its own state.

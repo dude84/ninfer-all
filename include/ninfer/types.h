@@ -684,10 +684,10 @@ struct EngineOptions {
     // per-slot host state image.
     bool lm_head_q4                        = false;
     bool gdn_state_fp16                    = false;
-    // RR, refusal removal (llm-lab dev branch r1-runtime-uncensor; Qwen3.5 family): with a direction file (RRDIR01,
-    // [layers, hidden] FP32 unit vectors from the calibration tap), every layer in rr_layers ("a-b", empty = all)
-    // subtracts rr_strength times the residual's component along the direction of layer rr_layer (-1 = each layer's
-    // own). Empty rr_directions = off, nothing runs.
+    // RR, refusal removal (llm-lab dev branch r1-runtime-uncensor; Qwen3.5 family and Flash-Next): with a direction
+    // file (RRDIR01, [layers, hidden] FP32 unit vectors from the calibration tap), every layer in rr_layers ("a-b",
+    // empty = all) subtracts rr_strength times the residual's component (Flash-Next: of every hyper-connection stream)
+    // along the direction of layer rr_layer (-1 = each layer's own). Empty rr_directions = off, nothing runs.
     std::string rr_directions;
     std::int32_t rr_layer                  = -1;
     float rr_strength                      = 1.0f;

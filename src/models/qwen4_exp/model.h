@@ -26,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -122,6 +123,12 @@ struct LoadOptions {
     // Loads the MTP block the artifact carries (its `mtp` component) onto the last stage's device,
     // beside the head it shares; its experts take the text layers' residency.
     bool mtp = false;
+    // RR, refusal removal (llm-lab dev branch r1-runtime-uncensor): see
+    // EngineOptions::rr_directions.
+    std::string rr_directions;
+    std::int32_t rr_layer = -1;
+    float rr_strength     = 1.0f;
+    std::string rr_layers;
 };
 
 class Model {
