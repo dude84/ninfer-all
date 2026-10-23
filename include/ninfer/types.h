@@ -692,6 +692,10 @@ struct EngineOptions {
     std::int32_t rr_layer                  = -1;
     float rr_strength                      = 1.0f;
     std::string rr_layers;
+    // When the removal runs (Qwen3.5 family): "all" (default) every forward pass; "answer" only the passes after the
+    // request's reasoning block has closed (or, without reasoning, every decode pass), never the prompt;
+    // "prompt+answer" the prompt too. Not "all" needs max_concurrency 1 (one process-wide gate).
+    std::string rr_phase                   = "all";
     // Device-memory trades that store a W8 vocabulary matrix at a narrower group-64 width while
     // the weights load (the artifact is unchanged). lm_head_q6 saves ~26% of the output head for
     // +0.01% perplexity; embedding_q4 halves the token embedding with no measurable perplexity

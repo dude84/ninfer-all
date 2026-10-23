@@ -55,6 +55,7 @@ struct LoadOptions {
     std::int32_t rr_layer = -1;
     float rr_strength     = 1.0f;
     std::string rr_layers;
+    std::string rr_phase = "all";
 
     bool operator==(const LoadOptions&) const = default;
 
@@ -139,7 +140,8 @@ struct LoadOptions {
             .rr_directions = options.rr_directions,
             .rr_layer      = options.rr_layer,
             .rr_strength   = options.rr_strength,
-            .rr_layers     = options.rr_layers};
+            .rr_layers     = options.rr_layers,
+            .rr_phase      = options.rr_phase};
 }
 
 } // namespace ninfer::models

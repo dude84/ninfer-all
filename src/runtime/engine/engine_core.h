@@ -2150,6 +2150,9 @@ private:
             throw std::logic_error("prefill request has no sequence handle");
         }
         setup.finish();
+        if constexpr (requires { instance_.program->rr_phase(true, false); }) {
+            instance_.program->rr_phase(true, false);
+        }
         ProgramCallScope program_call(*this);
         auto progress =
             instance_.program->advance_prefill(*request->sequence, &program_call.failed_timing());
@@ -2672,6 +2675,15 @@ private:
                           const std::array<bool, kMaximumConcurrency>& cancelled_at_unit_start) {
         nvtx::ScopedRange decode_range(nvtx::Name::Decode, nvtx::Category::Decode,
                                        static_cast<std::uint64_t>(membership.size));
+        // RR --rr-phase: one gate (--max-concurrency 1), so the round's first lane names the step.
+        if constexpr (requires(Request& r) {
+                          instance_.program->rr_phase(false, false);
+                          r.output.in_reasoning();
+                      }) {
+            if (membership.size > 0 && slots_[membership.lane_span()[0]] != nullptr) {
+                instance_.program->rr_phase(false, slots_[membership.lane_span()[0]]->output.in_reasoning());
+            }
+        }
         ProgramCallScope program_call(*this);
         auto pending = instance_.program->decode(
             membership.sequence_span(), membership.budget_span(), &program_call.failed_timing());

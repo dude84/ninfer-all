@@ -1212,6 +1212,22 @@ void TextContext::rr_tap_capture(std::uint32_t layer, const Tensor& x, cudaStrea
                                cudaMemcpyDeviceToHost, stream));
 }
 
+namespace {
+// --rr-phase: 0 all, 1 answer, 2 prompt+answer; the gate is allocated once per process when not "all".
+int rr_phase_mode       = 0;
+float* rr_phase_gate    = nullptr;
+float rr_phase_value    = -1.0f;
+} // namespace
+
+void rr_phase_step(RRStep step, cudaStream_t stream) {
+    if (rr_phase_gate == nullptr) { return; }
+    const float value = step == RRStep::Answer ? 1.0f : step == RRStep::Prompt && rr_phase_mode == 2 ? 1.0f : 0.0f;
+    if (value == rr_phase_value) { return; }
+    // Pageable source: the copy is staged before the call returns, so a later step cannot race it.
+    CUDA_CHECK(cudaMemcpyAsync(rr_phase_gate, &value, sizeof(value), cudaMemcpyHostToDevice, stream));
+    rr_phase_value = value;
+}
+
 void TextContext::rr_load_directions(const models::LoadOptions& options) {
     const std::string& path = options.rr_directions;
     std::ifstream in(path, std::ios::binary);
@@ -1244,6 +1260,20 @@ void TextContext::rr_load_directions(const models::LoadOptions& options) {
     }
     rr_directions_ = shared_directions;
     rr_strength_   = options.rr_strength;
+    if (options.rr_phase != "all") {
+        rr_phase_mode = options.rr_phase == "answer" ? 1 : 2;
+        if (rr_phase_gate == nullptr) {
+            // Gate 1 until the first step names the phase (the startup capture and warmup run as before).
+            const float one = 1.0f;
+            cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
+            CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
+            CUDA_CHECK(cudaMalloc(&rr_phase_gate, sizeof(float)));
+            CUDA_CHECK(cudaMemcpy(rr_phase_gate, &one, sizeof(one), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
+            rr_phase_value = 1.0f;
+        }
+        rr_gate_ = rr_phase_gate;
+    }
     rr_begin_      = 0;
     rr_end_        = layers - 1;
     if (!options.rr_layers.empty()) {
@@ -1256,9 +1286,10 @@ void TextContext::rr_load_directions(const models::LoadOptions& options) {
     if (rr_begin_ > rr_end_ || rr_end_ >= layers || rr_source_ >= static_cast<std::int32_t>(layers)) {
         throw std::runtime_error("--rr-layers / --rr-layer out of range for " + std::to_string(layers) + " layers");
     }
-    std::fprintf(stderr, "RR directions %s: layers %u-%u, strength %.3f, direction of %s\n", path.c_str(), rr_begin_,
-                 rr_end_, static_cast<double>(rr_strength_),
-                 rr_source_ >= 0 ? ("layer " + std::to_string(rr_source_)).c_str() : "each layer");
+    std::fprintf(stderr, "RR directions %s: layers %u-%u, strength %.3f, direction of %s, phase %s\n", path.c_str(),
+                 rr_begin_, rr_end_, static_cast<double>(rr_strength_),
+                 rr_source_ >= 0 ? ("layer " + std::to_string(rr_source_)).c_str() : "each layer",
+                 options.rr_phase.c_str());
 }
 
 void TextContext::rr_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream) {
@@ -1323,7 +1354,7 @@ void TextContext::run_stage_layers(std::size_t stage, Tensor& x, Phase ph, Tap& 
             if (rr_directions_ != nullptr && layer >= rr_begin_ && layer <= rr_end_) {
                 const auto row = static_cast<std::size_t>(rr_source_ >= 0 ? rr_source_ : layer);
                 ops::rr_project(x, rr_directions_ + row * static_cast<std::size_t>(config_.hidden_size), rr_strength_,
-                                ctx_.stream);
+                                ctx_.stream, rr_gate_);
             }
             if constexpr (Tap::enabled) {
                 tap.capture_layer(static_cast<int>(layer), x, ctx_.stream);

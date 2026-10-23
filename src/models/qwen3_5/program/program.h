@@ -1079,6 +1079,9 @@ public:
     // Replaces the sampling of an active sequence from its next round; the grammar mask and the
     // penalty counts carry over.
     void update_sampling(SequenceHandle sequence, const ResolvedSamplingParameters& sampling);
+    // RR --rr-phase: the step of the passes enqueued next, a prompt (prefill) or a generation inside or after the
+    // reasoning block (stream-ordered; a no-op without a phase gate).
+    void rr_phase(bool prompt, bool reasoning);
     // A decode-ready sequence whose grammar masks are costly decodes without drafts, its next mask
     // computing on a thread of its own from the first call after its last commit; the Engine
     // leaves the lane out of rounds until it is ready, so its mask holds no other lane's round.

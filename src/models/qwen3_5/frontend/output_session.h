@@ -89,6 +89,8 @@ public:
     [[nodiscard]] ThinkingBudgetStats thinking_stats() const noexcept;
     // True once a session that began inside a reasoning block has committed its close.
     [[nodiscard]] bool reasoning_closed() const noexcept;
+    // True while a session that began inside a reasoning block has not committed its close.
+    [[nodiscard]] bool in_reasoning() const noexcept;
     [[nodiscard]] std::optional<std::string> matched_stop_string() const;
 
 private:

@@ -319,6 +319,7 @@ private:
     std::uint32_t rr_begin_  = 0;
     std::uint32_t rr_end_    = 0;
     std::int32_t rr_source_  = -1;
+    const float* rr_gate_    = nullptr;  // device scalar of --rr-phase (null with "all"), see rr_phase_step
     void rr_load_directions(const models::LoadOptions& options);
     void rr_tap_capture(std::uint32_t layer, const Tensor& x, cudaStream_t stream);
     void rr_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream);
@@ -336,5 +337,11 @@ private:
     const MtpParameters* mtp_                   = nullptr;
     StageRuntime* stage_runtime_                = nullptr;
 };
+
+// RR --rr-phase: the request's step in the passes that run next. With --rr-phase answer or prompt+answer, the one
+// process-wide gate that every text context's projection reads becomes 1 or 0 (stream-ordered on `stream`); a no-op
+// with "all" or without RR.
+enum class RRStep { Prompt, Reasoning, Answer };
+void rr_phase_step(RRStep step, cudaStream_t stream);
 
 } // namespace ninfer::models::qwen3_5::execution

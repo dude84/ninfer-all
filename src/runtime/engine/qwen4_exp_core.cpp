@@ -215,6 +215,9 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
     load.rr_layer      = options.rr_layer;
     load.rr_strength   = options.rr_strength;
     load.rr_layers     = options.rr_layers;
+    if (options.rr_phase != "all") {
+        throw std::invalid_argument("--rr-phase " + options.rr_phase + ": Flash-Next runs RR in every pass only (all)");
+    }
     StartupPhaseScope materialize(options.startup_observer, StartupPhase::TargetPlan);
     auto model = models::qwen4_exp::load_model(reader, load, device, &options.startup_observer);
     device.synchronize();

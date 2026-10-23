@@ -165,6 +165,10 @@ std::string serve_usage_text(const char* argv0) {
            "                                (default: each layer its own)\n"
            "  --rr-strength X               multiple of the component removed (default 1)\n"
            "  --rr-layers A-B               layers that remove it (default all)\n"
+           "  --rr-phase all|answer|prompt+answer\n"
+           "                                passes that remove it: all (default), only\n"
+           "                                after the reasoning block closed, or that and\n"
+           "                                the prompt (not all: --max-concurrency 1)\n"
            "  --rope-yarn                   past the model's native window, apply Qwen's\n"
            "                                YaRN at factor max-context / native instead of\n"
            "                                unscaled RoPE\n"
@@ -1352,6 +1356,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.rr_layers = require_value("--rr-layers");
             continue;
         }
+        if (arg == "--rr-phase") {
+            options.rr_phase = require_value("--rr-phase");
+            continue;
+        }
         if (arg == "--rope-yarn") {
             options.rope_yarn = true;
             continue;
@@ -1732,6 +1740,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--stats-port must be in [1,65535] and differ from --port");
     }
     if (options.max_context == 0) { throw std::invalid_argument("--max-context must be positive"); }
+    if (options.rr_phase != "all" && options.rr_phase != "answer" && options.rr_phase != "prompt+answer") {
+        throw std::invalid_argument("--rr-phase must be all, answer or prompt+answer");
+    }
+    if (options.rr_phase != "all" && options.max_concurrency != 1) {
+        throw std::invalid_argument("--rr-phase " + options.rr_phase + " needs --max-concurrency 1");
+    }
     if (options.kv_capacity.mode == KvCapacityMode::Explicit &&
         options.kv_capacity.explicit_tokens < options.max_context) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");

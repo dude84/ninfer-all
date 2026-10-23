@@ -445,6 +445,12 @@ void Program::update_sampling(SequenceHandle sequence, const ResolvedSamplingPar
     impl_->update_sampling(sequence, sampling);
 }
 
+void Program::rr_phase(bool prompt, bool reasoning) {
+    using execution::RRStep;
+    execution::rr_phase_step(prompt ? RRStep::Prompt : reasoning ? RRStep::Reasoning : RRStep::Answer,
+                             impl_->device.stream);
+}
+
 StructuredReadiness Program::structured_readiness(SequenceHandle sequence) {
     return impl_->structured_readiness(sequence);
 }

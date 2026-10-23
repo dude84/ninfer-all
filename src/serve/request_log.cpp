@@ -803,6 +803,8 @@ std::string format_server_start_json(
         {"rr_directions", engine_options.rr_directions},
         {"rr_layer", engine_options.rr_layer},
         {"rr_strength", engine_options.rr_strength},
+        {"rr_layers", engine_options.rr_layers},
+        {"rr_phase", engine_options.rr_phase},
         {"rope_yarn", engine_options.rope_yarn},
         {"rope_yarn_factor", engine_options.rope_yarn_factor},
         {"rope_scaling_factor", engine_options.rope_scaling_factor},

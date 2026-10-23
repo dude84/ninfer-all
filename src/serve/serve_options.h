@@ -93,6 +93,7 @@ struct ServeOptions {
     std::int32_t rr_layer   = -1;
     float rr_strength       = 1.0f;
     std::string rr_layers;
+    std::string rr_phase    = "all";
     bool rope_yarn          = false;
     float rope_yarn_factor  = 1.0F;
     float rope_scaling_factor                   = 1.0F;

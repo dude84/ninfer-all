@@ -1111,6 +1111,10 @@ bool OutputSession::reasoning_closed() const noexcept {
     return impl_ != nullptr && impl_->started_in_reasoning && !impl_->prefix_execution.tracking;
 }
 
+bool OutputSession::in_reasoning() const noexcept {
+    return impl_ != nullptr && impl_->started_in_reasoning && impl_->prefix_execution.tracking;
+}
+
 ThinkingBudgetStats OutputSession::thinking_stats() const noexcept {
     if (impl_ == nullptr) { return {}; }
     return ThinkingBudgetStats{

@@ -20,7 +20,12 @@ __device__ void rr_store(__nv_bfloat16& out, float v) { out = __float2bfloat16(v
 __device__ void rr_store(float& out, float v) { out = v; }
 
 template <class T>
-__global__ void rr_project_kernel(T* x, std::int64_t pitch, int hidden, const float* u, float strength) {
+__global__ void rr_project_kernel(T* x, std::int64_t pitch, int hidden, const float* u, float strength,
+                                  const float* gate) {
+    if (gate != nullptr) {
+        strength *= *gate;
+        if (strength == 0.0f) { return; }
+    }
     T* col    = x + static_cast<std::int64_t>(blockIdx.x) * pitch;
     float sum = 0.0f;
     for (int i = threadIdx.x; i < hidden; i += kBlock) { sum += rr_load(col[i]) * u[i]; }
@@ -39,15 +44,15 @@ __global__ void rr_project_kernel(T* x, std::int64_t pitch, int hidden, const fl
 }
 
 template <class T>
-void launch(Tensor& x, const float* u, float strength, cudaStream_t stream) {
+void launch(Tensor& x, const float* u, float strength, cudaStream_t stream, const float* gate) {
     const std::int64_t pitch = x.nb[1] / static_cast<std::int64_t>(sizeof(T));
-    rr_project_kernel<T><<<x.ne[1], kBlock, 0, stream>>>(static_cast<T*>(x.data), pitch, x.ne[0], u, strength);
+    rr_project_kernel<T><<<x.ne[1], kBlock, 0, stream>>>(static_cast<T*>(x.data), pitch, x.ne[0], u, strength, gate);
     CUDA_CHECK(cudaGetLastError());
 }
 
 } // namespace
 
-void rr_project(Tensor& x, const float* u, float strength, cudaStream_t stream) {
+void rr_project(Tensor& x, const float* u, float strength, cudaStream_t stream, const float* gate) {
     const bool bf16 = x.dtype == DType::BF16;
     if ((!bf16 && x.dtype != DType::FP32) || u == nullptr || x.ne[0] <= 0 || x.ne[1] <= 0 ||
         x.nb[1] % static_cast<std::int64_t>(bf16 ? sizeof(__nv_bfloat16) : sizeof(float)) != 0) {
@@ -55,9 +60,9 @@ void rr_project(Tensor& x, const float* u, float strength, cudaStream_t stream) 
     }
     if (strength == 0.0f) { return; }
     if (bf16) {
-        launch<__nv_bfloat16>(x, u, strength, stream);
+        launch<__nv_bfloat16>(x, u, strength, stream, gate);
     } else {
-        launch<float>(x, u, strength, stream);
+        launch<float>(x, u, strength, stream, gate);
     }
 }
 
