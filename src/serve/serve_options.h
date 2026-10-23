@@ -89,6 +89,10 @@ struct ServeOptions {
     bool embedding_q6       = false;
     bool mtp_experts_q4     = false;
     bool gdn_state_fp16     = false;
+    std::string rr_directions;   // RR, refusal removal: see EngineOptions::rr_directions
+    std::int32_t rr_layer   = -1;
+    float rr_strength       = 1.0f;
+    std::string rr_layers;
     bool rope_yarn          = false;
     float rope_yarn_factor  = 1.0F;
     float rope_scaling_factor                   = 1.0F;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -49,6 +50,11 @@ struct LoadOptions {
     std::size_t ranks = 1;
     // Layers per stage (`--stage-layers`), one count per device. Empty lets the engine choose.
     std::vector<std::uint32_t> stage_layers;
+    // RR, refusal removal (llm-lab dev branch): see EngineOptions::rr_directions.
+    std::string rr_directions;
+    std::int32_t rr_layer = -1;
+    float rr_strength     = 1.0f;
+    std::string rr_layers;
 
     bool operator==(const LoadOptions&) const = default;
 
@@ -129,7 +135,11 @@ struct LoadOptions {
             .vision_residency         = options.enable_vision ? options.vision_residency
                                                               : VisionResidency::Resident,
             .ranks = std::max<std::size_t>(options.devices.size(), 1),
-            .stage_layers = options.stage_layers};
+            .stage_layers = options.stage_layers,
+            .rr_directions = options.rr_directions,
+            .rr_layer      = options.rr_layer,
+            .rr_strength   = options.rr_strength,
+            .rr_layers     = options.rr_layers};
 }
 
 } // namespace ninfer::models

@@ -285,6 +285,10 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.embedding_q6             = options.embedding_q6;
     engine_options.mtp_experts_q4           = options.mtp_experts_q4;
     engine_options.gdn_state_fp16           = options.gdn_state_fp16;
+    engine_options.rr_directions            = options.rr_directions;
+    engine_options.rr_layer                 = options.rr_layer;
+    engine_options.rr_strength              = options.rr_strength;
+    engine_options.rr_layers                = options.rr_layers;
     engine_options.rope_yarn                = options.rope_yarn;
     engine_options.rope_yarn_factor         = options.rope_yarn_factor;
     engine_options.rope_scaling_factor           = options.rope_scaling_factor;

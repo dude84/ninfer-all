@@ -298,10 +298,10 @@ private:
     Tensor* rewrite_checkpoint_hidden_output_ = nullptr;
     std::uint32_t mtp_proposal_extent_        = 0;
     std::span<const cudaEvent_t> layer_ready_;
-    // R1 phase 1 (llm-lab dev branch r1-runtime-uncensor): with NINFER_R1_TAP=<file>, each prompt whose last
-    // prefill chunk runs here appends one record to <file>: the residual stream after every layer at the last
-    // prompt token, R1TapHeader then [layers, hidden] BF16. Floats and counts only, never tokens or text.
-    struct R1Tap {
+    // RR, refusal removal (llm-lab dev branch r1-runtime-uncensor). Calibration tap: with NINFER_RR_TAP=<file>, each
+    // prompt whose last prefill chunk runs here appends one record to <file>: the residual stream after every layer at
+    // the last prompt token, RRTAP01 header then [layers, hidden] BF16. Floats and counts only, never tokens or text.
+    struct RRTap {
         std::string path;
         std::uint32_t layers = 0;
         std::uint32_t hidden = 0;
@@ -309,19 +309,19 @@ private:
         bool armed           = false;
         std::uint64_t records = 0;
     };
-    R1Tap r1_tap_;
-    // R1 phase 2: with NINFER_R1_DIRECTIONS=<file> (R1DIR01: header + [layers, hidden] FP32 unit vectors), every
-    // layer in NINFER_R1_LAYERS (default all, "a-b" inclusive) removes alpha (NINFER_R1_ALPHA, default 1) times the
-    // residual's component along its direction, or along layer NINFER_R1_SOURCE_LAYER's for every layer when set.
-    // One process-wide setting: the startup-captured graphs include it.
-    float* r1_directions_    = nullptr;  // device [layers, hidden]
-    float r1_alpha_          = 0.0f;
-    std::uint32_t r1_begin_  = 0;
-    std::uint32_t r1_end_    = 0;
-    std::int32_t r1_source_  = -1;
-    void r1_load_directions(const char* path);
-    void r1_tap_capture(std::uint32_t layer, const Tensor& x, cudaStream_t stream);
-    void r1_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream);
+    RRTap rr_tap_;
+    // RR: with --rr-directions <file> (RRDIR01: header + [layers, hidden] FP32 unit vectors), every layer in --rr-layers
+    // (default all) removes --rr-strength (default 1) times the residual's component along a direction: the one of
+    // layer --rr-layer for every layer when given, else each layer's own. A load option of the model: the
+    // startup-captured graphs include it.
+    float* rr_directions_    = nullptr;  // device [layers, hidden]
+    float rr_strength_       = 0.0f;
+    std::uint32_t rr_begin_  = 0;
+    std::uint32_t rr_end_    = 0;
+    std::int32_t rr_source_  = -1;
+    void rr_load_directions(const models::LoadOptions& options);
+    void rr_tap_capture(std::uint32_t layer, const Tensor& x, cudaStream_t stream);
+    void rr_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream);
 
     const Weight* embed_                        = nullptr;
     const Tensor* final_norm_                   = nullptr;

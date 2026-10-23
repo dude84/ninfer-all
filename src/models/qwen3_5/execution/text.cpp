@@ -23,7 +23,7 @@
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/logprob_topk.h"
 #include "ninfer/ops/readout_logprobs.h"
-#include "ninfer/ops/r1_project.h"
+#include "ninfer/ops/rr_project.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/speculative_round.h"
@@ -256,15 +256,13 @@ TextContext::TextContext(DeviceContext& ctx, const execution::Parameters& weight
         throw std::invalid_argument("MTP TextContext requires MTP round state");
     }
     set_linear_state_slots(0, 0);
-    if (const char* tap = std::getenv("NINFER_R1_TAP"); tap != nullptr && *tap != '\0') {
-        r1_tap_.path   = tap;
-        r1_tap_.layers = static_cast<std::uint32_t>(parameters_.text.layers.size());
-        r1_tap_.hidden = static_cast<std::uint32_t>(config_.hidden_size);
-        r1_tap_.host.assign(static_cast<std::size_t>(r1_tap_.layers) * r1_tap_.hidden, 0);
+    if (const char* tap = std::getenv("NINFER_RR_TAP"); tap != nullptr && *tap != '\0') {
+        rr_tap_.path   = tap;
+        rr_tap_.layers = static_cast<std::uint32_t>(parameters_.text.layers.size());
+        rr_tap_.hidden = static_cast<std::uint32_t>(config_.hidden_size);
+        rr_tap_.host.assign(static_cast<std::size_t>(rr_tap_.layers) * rr_tap_.hidden, 0);
     }
-    if (const char* dirs = std::getenv("NINFER_R1_DIRECTIONS"); dirs != nullptr && *dirs != '\0') {
-        r1_load_directions(dirs);
-    }
+    if (!parameters_.model.options().rr_directions.empty()) { rr_load_directions(parameters_.model.options()); }
     embed_      = &parameters_.text.token_embedding;
     final_norm_ = &parameters_.text.final_norm;
     lm_head_    = &parameters_.text.output_head;
@@ -1201,20 +1199,21 @@ GdnReplayRecordLayer TextContext::replay_layer(std::uint32_t layer, std::int32_t
                                                         batch, width);
 }
 
-// R1 phase 1 tap (see text.h): the last column of this prefill chunk is the last prompt token.
-void TextContext::r1_tap_capture(std::uint32_t layer, const Tensor& x, cudaStream_t stream) {
-    if (x.dtype != DType::BF16 || x.ne[0] != static_cast<std::int32_t>(r1_tap_.hidden) || x.ne[1] < 1 ||
-        layer >= r1_tap_.layers) {
-        throw std::logic_error("R1 tap: residual shape does not match [hidden, columns] BF16");
+// RR calibration tap (see text.h): the last column of this prefill chunk is the last prompt token.
+void TextContext::rr_tap_capture(std::uint32_t layer, const Tensor& x, cudaStream_t stream) {
+    if (x.dtype != DType::BF16 || x.ne[0] != static_cast<std::int32_t>(rr_tap_.hidden) || x.ne[1] < 1 ||
+        layer >= rr_tap_.layers) {
+        throw std::logic_error("RR tap: residual shape does not match [hidden, columns] BF16");
     }
     const auto* column = static_cast<const std::byte*>(x.data) +
                          static_cast<std::size_t>(x.ne[1] - 1) * static_cast<std::size_t>(x.nb[1]);
-    CUDA_CHECK(cudaMemcpyAsync(r1_tap_.host.data() + static_cast<std::size_t>(layer) * r1_tap_.hidden,
-                               column, static_cast<std::size_t>(r1_tap_.hidden) * sizeof(std::uint16_t),
+    CUDA_CHECK(cudaMemcpyAsync(rr_tap_.host.data() + static_cast<std::size_t>(layer) * rr_tap_.hidden,
+                               column, static_cast<std::size_t>(rr_tap_.hidden) * sizeof(std::uint16_t),
                                cudaMemcpyDeviceToHost, stream));
 }
 
-void TextContext::r1_load_directions(const char* path) {
+void TextContext::rr_load_directions(const models::LoadOptions& options) {
+    const std::string& path = options.rr_directions;
     std::ifstream in(path, std::ios::binary);
     char magic[8] = {};
     std::uint32_t layers = 0, hidden = 0;
@@ -1222,16 +1221,17 @@ void TextContext::r1_load_directions(const char* path) {
     in.read(reinterpret_cast<char*>(&layers), sizeof(layers));
     in.read(reinterpret_cast<char*>(&hidden), sizeof(hidden));
     const auto model_layers = static_cast<std::uint32_t>(parameters_.text.layers.size());
-    if (!in || std::string(magic, 7) != "R1DIR01" || layers != model_layers ||
+    const std::string tag(magic, 7);  // R1DIR01 = the same layout, written before the rename
+    if (!in || (tag != "RRDIR01" && tag != "R1DIR01") || layers != model_layers ||
         hidden != static_cast<std::uint32_t>(config_.hidden_size)) {
-        throw std::runtime_error(std::string("NINFER_R1_DIRECTIONS: ") + path + " is not an R1DIR01 file for " +
+        throw std::runtime_error("--rr-directions: " + path + " is not an RRDIR01 file for " +
                                  std::to_string(model_layers) + " x " + std::to_string(config_.hidden_size));
     }
     std::vector<float> host(static_cast<std::size_t>(layers) * hidden);
     in.read(reinterpret_cast<char*>(host.data()), static_cast<std::streamsize>(host.size() * sizeof(float)));
-    if (!in) { throw std::runtime_error(std::string("NINFER_R1_DIRECTIONS: short file ") + path); }
+    if (!in) { throw std::runtime_error("--rr-directions: short file " + path); }
     // Text contexts are built while the engine captures its CUDA graphs, where a plain cudaMalloc is refused: the one
-    // upload runs in relaxed capture mode, once per process (every context of the process shares it).
+    // upload runs in relaxed capture mode, once per file (every context of the process shares it).
     static float* shared_directions = nullptr;
     static std::string shared_path;
     if (shared_directions == nullptr || shared_path != path) {
@@ -1242,43 +1242,41 @@ void TextContext::r1_load_directions(const char* path) {
         CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
         shared_path = path;
     }
-    r1_directions_ = shared_directions;
-    const char* alpha  = std::getenv("NINFER_R1_ALPHA");
-    const char* range  = std::getenv("NINFER_R1_LAYERS");
-    const char* source = std::getenv("NINFER_R1_SOURCE_LAYER");
-    r1_alpha_ = alpha != nullptr && *alpha != '\0' ? std::stof(alpha) : 1.0f;
-    r1_begin_ = 0;
-    r1_end_   = layers - 1;
-    if (range != nullptr && *range != '\0') {
-        const std::string text(range);
-        const auto dash = text.find('-');
-        r1_begin_ = static_cast<std::uint32_t>(std::stoul(text.substr(0, dash)));
-        r1_end_   = dash == std::string::npos ? r1_begin_ : static_cast<std::uint32_t>(std::stoul(text.substr(dash + 1)));
+    rr_directions_ = shared_directions;
+    rr_strength_   = options.rr_strength;
+    rr_begin_      = 0;
+    rr_end_        = layers - 1;
+    if (!options.rr_layers.empty()) {
+        const auto dash = options.rr_layers.find('-');
+        rr_begin_ = static_cast<std::uint32_t>(std::stoul(options.rr_layers.substr(0, dash)));
+        rr_end_   = dash == std::string::npos ? rr_begin_
+                                              : static_cast<std::uint32_t>(std::stoul(options.rr_layers.substr(dash + 1)));
     }
-    r1_source_ = source != nullptr && *source != '\0' ? std::stoi(source) : -1;
-    if (r1_begin_ > r1_end_ || r1_end_ >= layers || r1_source_ >= static_cast<std::int32_t>(layers)) {
-        throw std::runtime_error("NINFER_R1_LAYERS / NINFER_R1_SOURCE_LAYER out of range");
+    rr_source_ = options.rr_layer;
+    if (rr_begin_ > rr_end_ || rr_end_ >= layers || rr_source_ >= static_cast<std::int32_t>(layers)) {
+        throw std::runtime_error("--rr-layers / --rr-layer out of range for " + std::to_string(layers) + " layers");
     }
-    std::fprintf(stderr, "R1 directions %s: layers %u-%u, alpha %.3f, source %s\n", path, r1_begin_, r1_end_,
-                 static_cast<double>(r1_alpha_), r1_source_ >= 0 ? std::to_string(r1_source_).c_str() : "per layer");
+    std::fprintf(stderr, "RR directions %s: layers %u-%u, strength %.3f, direction of %s\n", path.c_str(), rr_begin_,
+                 rr_end_, static_cast<double>(rr_strength_),
+                 rr_source_ >= 0 ? ("layer " + std::to_string(rr_source_)).c_str() : "each layer");
 }
 
-void TextContext::r1_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream) {
+void TextContext::rr_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream) {
     CUDA_CHECK(cudaStreamSynchronize(stream));
     struct Header {
-        char magic[8] = {'R', '1', 'T', 'A', 'P', '0', '1', '\0'};
+        char magic[8] = {'R', 'R', 'T', 'A', 'P', '0', '1', '\0'};
         std::uint32_t layers = 0, hidden = 0, prompt_tokens = 0, dtype_bf16 = 1;
         std::uint64_t index = 0;
     } header;
-    header.layers        = r1_tap_.layers;
-    header.hidden        = r1_tap_.hidden;
+    header.layers        = rr_tap_.layers;
+    header.hidden        = rr_tap_.hidden;
     header.prompt_tokens = prompt_tokens;
-    header.index         = r1_tap_.records++;
-    std::ofstream out(r1_tap_.path, std::ios::binary | std::ios::app);
+    header.index         = rr_tap_.records++;
+    std::ofstream out(rr_tap_.path, std::ios::binary | std::ios::app);
     out.write(reinterpret_cast<const char*>(&header), sizeof(header));
-    out.write(reinterpret_cast<const char*>(r1_tap_.host.data()),
-              static_cast<std::streamsize>(r1_tap_.host.size() * sizeof(std::uint16_t)));
-    if (!out) { throw std::runtime_error("R1 tap: cannot append to " + r1_tap_.path); }
+    out.write(reinterpret_cast<const char*>(rr_tap_.host.data()),
+              static_cast<std::streamsize>(rr_tap_.host.size() * sizeof(std::uint16_t)));
+    if (!out) { throw std::runtime_error("RR tap: cannot append to " + rr_tap_.path); }
 }
 
 // The layers of one stage, in order. On one device this is the whole model.
@@ -1322,15 +1320,15 @@ void TextContext::run_stage_layers(std::size_t stage, Tensor& x, Phase ph, Tap& 
                          layer + 1 < end ? next_projection_hints(static_cast<int>(layer))
                                          : ops::SparseMoeHints{});
             }
-            if (r1_directions_ != nullptr && layer >= r1_begin_ && layer <= r1_end_) {
-                const auto row = static_cast<std::size_t>(r1_source_ >= 0 ? r1_source_ : layer);
-                ops::r1_project(x, r1_directions_ + row * static_cast<std::size_t>(config_.hidden_size), r1_alpha_,
+            if (rr_directions_ != nullptr && layer >= rr_begin_ && layer <= rr_end_) {
+                const auto row = static_cast<std::size_t>(rr_source_ >= 0 ? rr_source_ : layer);
+                ops::rr_project(x, rr_directions_ + row * static_cast<std::size_t>(config_.hidden_size), rr_strength_,
                                 ctx_.stream);
             }
             if constexpr (Tap::enabled) {
                 tap.capture_layer(static_cast<int>(layer), x, ctx_.stream);
             }
-            if (prefill && r1_tap_.armed) { r1_tap_capture(layer, x, ctx_.stream); }
+            if (prefill && rr_tap_.armed) { rr_tap_capture(layer, x, ctx_.stream); }
         } catch (const std::exception& error) {
             throw std::runtime_error("text/layers/" + std::to_string(layer) +
                                      (prefill ? " prefill" : " verify") +
@@ -1717,11 +1715,11 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 ops::scatter(embeddings, indices_device, x, s);
             }
             if constexpr (Tap::enabled) { tap.begin(x); }
-            r1_tap_.armed = is_last && !r1_tap_.path.empty();
+            rr_tap_.armed = is_last && !rr_tap_.path.empty();
             run_layers(x, Phase::Prefill, tap);
-            if (r1_tap_.armed) {
-                r1_tap_.armed = false;
-                r1_tap_flush(prompt_t0 + static_cast<std::uint32_t>(len), s);
+            if (rr_tap_.armed) {
+                rr_tap_.armed = false;
+                rr_tap_flush(prompt_t0 + static_cast<std::uint32_t>(len), s);
             }
             if constexpr (requires { tap.capture_positions(positions, s); }) {
                 tap.capture_positions(positions, s);
