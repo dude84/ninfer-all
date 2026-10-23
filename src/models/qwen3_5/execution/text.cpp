@@ -1237,11 +1237,20 @@ void TextContext::rr_load_directions(const models::LoadOptions& options) {
     in.read(reinterpret_cast<char*>(&layers), sizeof(layers));
     in.read(reinterpret_cast<char*>(&hidden), sizeof(hidden));
     const auto model_layers = static_cast<std::uint32_t>(parameters_.text.layers.size());
-    const std::string tag(magic, 7);  // R1DIR01 = the same layout, written before the rename
-    if (!in || (tag != "RRDIR01" && tag != "R1DIR01") || layers != model_layers ||
+    // R1DIR01 = RRDIR01, written before the rename; RRDIR02 (Plan B) = RRDIR01 with FP32 strength[layers] before the
+    // directions: each layer's strength times --rr-strength, 0 = the layer is skipped.
+    const std::string tag(magic, 7);
+    const bool per_layer = tag == "RRDIR02";
+    if (!in || (tag != "RRDIR01" && tag != "R1DIR01" && !per_layer) || layers != model_layers ||
         hidden != static_cast<std::uint32_t>(config_.hidden_size)) {
-        throw std::runtime_error("--rr-directions: " + path + " is not an RRDIR01 file for " +
+        throw std::runtime_error("--rr-directions: " + path + " is not an RRDIR01/02 file for " +
                                  std::to_string(model_layers) + " x " + std::to_string(config_.hidden_size));
+    }
+    rr_layer_strengths_.clear();
+    if (per_layer) {
+        rr_layer_strengths_.resize(layers);
+        in.read(reinterpret_cast<char*>(rr_layer_strengths_.data()),
+                static_cast<std::streamsize>(layers * sizeof(float)));
     }
     std::vector<float> host(static_cast<std::size_t>(layers) * hidden);
     in.read(reinterpret_cast<char*>(host.data()), static_cast<std::streamsize>(host.size() * sizeof(float)));
@@ -1290,6 +1299,16 @@ void TextContext::rr_load_directions(const models::LoadOptions& options) {
                  rr_begin_, rr_end_, static_cast<double>(rr_strength_),
                  rr_source_ >= 0 ? ("layer " + std::to_string(rr_source_)).c_str() : "each layer",
                  options.rr_phase.c_str());
+    if (per_layer) {
+        std::uint32_t active = 0;
+        float peak           = 0.0f;
+        for (const float s : rr_layer_strengths_) {
+            active += s != 0.0f ? 1U : 0U;
+            peak = std::max(peak, s);
+        }
+        std::fprintf(stderr, "RR per-layer strengths (RRDIR02): %u layers on, peak %.3f\n", active,
+                     static_cast<double>(peak));
+    }
 }
 
 void TextContext::rr_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream) {
@@ -1353,7 +1372,9 @@ void TextContext::run_stage_layers(std::size_t stage, Tensor& x, Phase ph, Tap& 
             }
             if (rr_directions_ != nullptr && layer >= rr_begin_ && layer <= rr_end_) {
                 const auto row = static_cast<std::size_t>(rr_source_ >= 0 ? rr_source_ : layer);
-                ops::rr_project(x, rr_directions_ + row * static_cast<std::size_t>(config_.hidden_size), rr_strength_,
+                const float strength =
+                    rr_layer_strengths_.empty() ? rr_strength_ : rr_strength_ * rr_layer_strengths_[layer];
+                ops::rr_project(x, rr_directions_ + row * static_cast<std::size_t>(config_.hidden_size), strength,
                                 ctx_.stream, rr_gate_);
             }
             if constexpr (Tap::enabled) {

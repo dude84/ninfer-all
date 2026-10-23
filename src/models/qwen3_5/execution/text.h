@@ -319,7 +319,8 @@ private:
     std::uint32_t rr_begin_  = 0;
     std::uint32_t rr_end_    = 0;
     std::int32_t rr_source_  = -1;
-    const float* rr_gate_    = nullptr;  // device scalar of --rr-phase (null with "all"), see rr_phase_step
+    const float* rr_gate_    = nullptr;
+    std::vector<float> rr_layer_strengths_;  // RRDIR02: per layer, times rr_strength_ (empty with RRDIR01)  // device scalar of --rr-phase (null with "all"), see rr_phase_step
     void rr_load_directions(const models::LoadOptions& options);
     void rr_tap_capture(std::uint32_t layer, const Tensor& x, cudaStream_t stream);
     void rr_tap_flush(std::uint32_t prompt_tokens, cudaStream_t stream);
