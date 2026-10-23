@@ -274,6 +274,9 @@ public:
     [[nodiscard]] bool runs_branches() const noexcept;
     // The most logit rows one pass leaves.
     [[nodiscard]] std::uint32_t max_logit_rows() const noexcept;
+    // RR calibration tap (llm-lab dev branch): the next forward() is a prompt's last chunk, which
+    // with NINFER_RR_TAP=<file> appends its record to <file>. No effect without the variable.
+    void rr_tap_last_chunk();
     // Runs one token of each of `sequences` (distinct) at its next position in one pass, and
     // leaves their logits in logits(), one column per sequence in that order. The experts read
     // their weights once for the whole batch; each sequence's mixers run on its own state.

@@ -295,6 +295,11 @@ ConstructedQwen4Exp construct_qwen4_exp(const EngineOptions& options, DeviceCont
                 reader, load, rank_free_bytes(device), rank_copy_bandwidth(device));
         }
     }
+    // RR, refusal removal (llm-lab dev branch): the residual projection and its directions.
+    load.rr_directions = options.rr_directions;
+    load.rr_layer      = options.rr_layer;
+    load.rr_strength   = options.rr_strength;
+    load.rr_layers     = options.rr_layers;
     StartupPhaseScope materialize(options.startup_observer, StartupPhase::TargetPlan);
     auto model = models::qwen4_exp::load_model(reader, load, device, &options.startup_observer);
     device.synchronize();
@@ -2255,6 +2260,9 @@ struct Qwen4ExpCore::Impl {
             slot.anchor_media.clear();
             cut = {.tokens = step.cut - r.prefilled, .state = &slot.snapshot};
         }
+        // RR calibration tap (llm-lab dev branch): this step ends the prompt. Packed steps of
+        // several prompts (forward_pieces) are not tapped: calibration runs one request at a time.
+        if (r.prefilled + n == prompt_n) { executor.rr_tap_last_chunk(); }
         // Only the prompt's last step leaves logits (end_prefill samples them).
         executor.forward(r.slot, prompt.subspan(r.prefilled, n), r.prefilled + n < prompt_n ? 0 : 1,
                          next, cut);

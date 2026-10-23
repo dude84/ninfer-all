@@ -30,6 +30,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -181,6 +182,12 @@ struct LoadOptions {
     // the PLE layer, a run of each shared expert and of the head's rows; rank 0 also the MTP block
     // and the Vision tower. One stage; the experts must be device resident.
     std::vector<double> tensor_split;
+    // RR, refusal removal (llm-lab dev branch r1-runtime-uncensor): see
+    // EngineOptions::rr_directions.
+    std::string rr_directions;
+    std::int32_t rr_layer = -1;
+    float rr_strength     = 1.0f;
+    std::string rr_layers;
 };
 
 class Model {
