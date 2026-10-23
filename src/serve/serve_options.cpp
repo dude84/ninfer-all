@@ -246,6 +246,13 @@ std::string serve_usage_text(const char* argv0) {
            "                                experts in the text layers' formats\n"
            "  --gdn-state-fp16              keep the GDN recurrent state in FP16 (halves\n"
            "                                each host state image)\n"
+           "  --rr-directions FILE          refusal removal: subtract the refusal direction\n"
+           "                                (RRDIR01 file from the calibration tap) from the\n"
+           "                                residual after every layer (Qwen3.5 family)\n"
+           "  --rr-layer N                  use layer N's direction at every layer\n"
+           "                                (default: each layer its own)\n"
+           "  --rr-strength X               multiple of the component removed (default 1)\n"
+           "  --rr-layers A-B               layers that remove it (default all)\n"
            "  --rope-yarn                   past the model's native window, apply Qwen's\n"
            "                                YaRN at factor max-context / native instead of\n"
            "                                unscaled RoPE\n"
@@ -1487,6 +1494,22 @@ ServeOptions parse_serve_arguments(bool artifact_given, const std::vector<std::s
             continue;
         }
         if (product::switch_option(arg, "gdn-state-fp16", [&](bool on) { options.gdn_state_fp16 = on; })) {
+            continue;
+        }
+        if (arg == "--rr-directions") {
+            options.rr_directions = require_value("--rr-directions");
+            continue;
+        }
+        if (arg == "--rr-layer") {
+            options.rr_layer = std::stoi(require_value("--rr-layer"));
+            continue;
+        }
+        if (arg == "--rr-strength") {
+            options.rr_strength = std::stof(require_value("--rr-strength"));
+            continue;
+        }
+        if (arg == "--rr-layers") {
+            options.rr_layers = require_value("--rr-layers");
             continue;
         }
         if (product::switch_option(arg, "rope-yarn", [&](bool on) { options.rope_yarn = on; })) {

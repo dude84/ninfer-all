@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -74,6 +75,11 @@ struct LoadOptions {
     // How a prompt chunk's partial sums cross between the devices
     // (`--tensor-parallel-prompt-partials`).
     TensorParallelPartials tensor_parallel_prompt_partials = TensorParallelPartials::Fp32;
+    // RR, refusal removal (llm-lab dev branch): see EngineOptions::rr_directions.
+    std::string rr_directions;
+    std::int32_t rr_layer = -1;
+    float rr_strength     = 1.0f;
+    std::string rr_layers;
 
     bool operator==(const LoadOptions&) const = default;
 
@@ -191,7 +197,11 @@ struct LoadOptions {
             .tensor_split    = options.tensor_split,
             .tensor_attention = options.tensor_attention,
             .tensor_parallel_transport = options.tensor_parallel_transport,
-            .tensor_parallel_prompt_partials = options.tensor_parallel_prompt_partials};
+            .tensor_parallel_prompt_partials = options.tensor_parallel_prompt_partials,
+            .rr_directions = options.rr_directions,
+            .rr_layer      = options.rr_layer,
+            .rr_strength   = options.rr_strength,
+            .rr_layers     = options.rr_layers};
 }
 
 } // namespace ninfer::models
