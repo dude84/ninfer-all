@@ -314,7 +314,8 @@ private:
     // (default all) removes --rr-strength (default 1) times the residual's component along a direction: the one of
     // layer --rr-layer for every layer when given, else each layer's own. A load option of the model: the
     // startup-captured graphs include it.
-    float* rr_directions_    = nullptr;  // device [layers, hidden]
+    float* rr_directions_    = nullptr;  // device [layers, k, hidden] (k = 1 except RRDIR03)
+    std::uint32_t rr_k_      = 1;
     float rr_strength_       = 0.0f;
     std::uint32_t rr_begin_  = 0;
     std::uint32_t rr_end_    = 0;

@@ -1232,18 +1232,20 @@ void TextContext::rr_load_directions(const models::LoadOptions& options) {
     const std::string& path = options.rr_directions;
     std::ifstream in(path, std::ios::binary);
     char magic[8] = {};
-    std::uint32_t layers = 0, hidden = 0;
+    std::uint32_t layers = 0, hidden = 0, k = 1;
     in.read(magic, sizeof(magic));
     in.read(reinterpret_cast<char*>(&layers), sizeof(layers));
     in.read(reinterpret_cast<char*>(&hidden), sizeof(hidden));
     const auto model_layers = static_cast<std::uint32_t>(parameters_.text.layers.size());
     // R1DIR01 = RRDIR01, written before the rename; RRDIR02 (Plan B) = RRDIR01 with FP32 strength[layers] before the
-    // directions: each layer's strength times --rr-strength, 0 = the layer is skipped.
+    // directions: each layer's strength times --rr-strength, 0 = the layer is skipped. RRDIR03 (multi-direction, 27.10) =
+    // RRDIR02 with u32 k after hidden and k orthonormal directions per layer ([layers, k, hidden]), removed one after another.
     const std::string tag(magic, 7);
-    const bool per_layer = tag == "RRDIR02";
+    if (tag == "RRDIR03") { in.read(reinterpret_cast<char*>(&k), sizeof(k)); }
+    const bool per_layer = tag == "RRDIR02" || tag == "RRDIR03";
     if (!in || (tag != "RRDIR01" && tag != "R1DIR01" && !per_layer) || layers != model_layers ||
-        hidden != static_cast<std::uint32_t>(config_.hidden_size)) {
-        throw std::runtime_error("--rr-directions: " + path + " is not an RRDIR01/02 file for " +
+        hidden != static_cast<std::uint32_t>(config_.hidden_size) || k == 0 || k > 64) {
+        throw std::runtime_error("--rr-directions: " + path + " is not an RRDIR01/02/03 file for " +
                                  std::to_string(model_layers) + " x " + std::to_string(config_.hidden_size));
     }
     rr_layer_strengths_.clear();
@@ -1252,7 +1254,7 @@ void TextContext::rr_load_directions(const models::LoadOptions& options) {
         in.read(reinterpret_cast<char*>(rr_layer_strengths_.data()),
                 static_cast<std::streamsize>(layers * sizeof(float)));
     }
-    std::vector<float> host(static_cast<std::size_t>(layers) * hidden);
+    std::vector<float> host(static_cast<std::size_t>(layers) * k * hidden);
     in.read(reinterpret_cast<char*>(host.data()), static_cast<std::streamsize>(host.size() * sizeof(float)));
     if (!in) { throw std::runtime_error("--rr-directions: short file " + path); }
     // Text contexts are built while the engine captures its CUDA graphs, where a plain cudaMalloc is refused: the one
@@ -1268,6 +1270,7 @@ void TextContext::rr_load_directions(const models::LoadOptions& options) {
         shared_path = path;
     }
     rr_directions_ = shared_directions;
+    rr_k_          = k;
     rr_strength_   = options.rr_strength;
     if (options.rr_phase != "all") {
         rr_phase_mode = options.rr_phase == "answer" ? 1 : 2;
@@ -1306,8 +1309,8 @@ void TextContext::rr_load_directions(const models::LoadOptions& options) {
             active += s != 0.0f ? 1U : 0U;
             peak = std::max(peak, s);
         }
-        std::fprintf(stderr, "RR per-layer strengths (RRDIR02): %u layers on, peak %.3f\n", active,
-                     static_cast<double>(peak));
+        std::fprintf(stderr, "RR per-layer strengths (%s): %u layers on, peak %.3f, %u directions per layer\n",
+                     tag.c_str(), active, static_cast<double>(peak), rr_k_);
     }
 }
 
@@ -1371,11 +1374,15 @@ void TextContext::run_stage_layers(std::size_t stage, Tensor& x, Phase ph, Tap& 
                                          : ops::SparseMoeHints{});
             }
             if (rr_directions_ != nullptr && layer >= rr_begin_ && layer <= rr_end_) {
-                const auto row = static_cast<std::size_t>(rr_source_ >= 0 ? rr_source_ : layer);
+                const auto row = static_cast<std::size_t>(rr_source_ >= 0 ? rr_source_ : layer) * rr_k_;
                 const float strength =
                     rr_layer_strengths_.empty() ? rr_strength_ : rr_strength_ * rr_layer_strengths_[layer];
-                ops::rr_project(x, rr_directions_ + row * static_cast<std::size_t>(config_.hidden_size), strength,
-                                ctx_.stream, rr_gate_);
+                if (strength != 0.0f) {
+                    for (std::size_t j = 0; j < rr_k_; ++j) {
+                        ops::rr_project(x, rr_directions_ + (row + j) * static_cast<std::size_t>(config_.hidden_size),
+                                        strength, ctx_.stream, rr_gate_);
+                    }
+                }
             }
             if constexpr (Tap::enabled) {
                 tap.capture_layer(static_cast<int>(layer), x, ctx_.stream);
